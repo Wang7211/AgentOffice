@@ -228,74 +228,94 @@ MCP_API_KEY=
 
 ```
 AgentOffice/
-├── main.py                          # 应用入口，服务启动
-├── app.py                           # FastAPI 应用工厂
+├── backend/                          # FastAPI 后端服务
+│   ├── main.py                       # 应用入口，服务启动
+│   ├── app.py                        # FastAPI 应用工厂
+│   ├── requirements.txt              # Python 依赖
+│   ├── Dockerfile                    # Docker 构建文件
+│   │
+│   ├── agent/                        # Agent 编排引擎
+│   │   ├── state.py                  # LangGraph 状态定义
+│   │   ├── nodes.py                  # Agent 节点实现
+│   │   └── graph.py                  # LangGraph StateGraph 流水线
+│   │
+│   ├── api/                          # REST API 路由
+│   │   ├── route.py                  # 聊天与工具接口
+│   │   ├── auth_route.py             # 认证相关接口
+│   │   └── admin_route.py            # 管理后台接口
+│   │
+│   ├── services/                     # 业务服务层
+│   │   ├── llm_service.py            # LLM 客户端（多供应商）
+│   │   ├── chat_service.py           # 聊天业务编排
+│   │   ├── knowledge_service.py      # 知识库服务
+│   │   ├── tool_service.py           # 工具注册与调度
+│   │   └── mcp_service.py            # MCP 协议服务
+│   │
+│   ├── tools/                        # 工具层实现
+│   │   ├── base.py                   # 工具基类与注册表
+│   │   ├── search_tool.py            # 网络搜索
+│   │   ├── code_tool.py              # Python 代码执行
+│   │   ├── file_tool.py              # 文件读写
+│   │   ├── browser_tool.py           # 网页抓取
+│   │   ├── knowledge_tool.py         # RAG 知识检索
+│   │   └── time_tool.py              # 时间查询
+│   │
+│   ├── memory/                       # 记忆模块
+│   │   ├── chat_memory.py            # 聊天历史（滑动窗口）
+│   │   ├── vector_memory.py          # 向量长期记忆
+│   │   └── store.py                  # 记忆存储适配器
+│   │
+│   ├── database/                     # 数据库层
+│   │   ├── db.py                     # 会话与引擎配置
+│   │   ├── tables.py                 # SQLAlchemy 模型
+│   │   ├── init_mysql.sql            # 数据库初始化脚本
+│   │   └── migrate.sql               # 迁移脚本
+│   │
+│   ├── config/                       # 全局配置
+│   │   └── settings.py               # Pydantic 配置类
+│   │
+│   ├── utils/                        # 通用工具
+│   │   ├── auth.py                   # JWT、密码哈希
+│   │   ├── exception.py              # 错误码与异常处理
+│   │   ├── logger.py                 # 日志配置
+│   │   ├── common.py                 # 通用函数
+│   │   ├── document_classifier.py    # 文档分类器
+│   │   └── structured_log.py         # 结构化日志
+│   │
+│   ├── schemas/                      # Pydantic 数据模型
+│   │   ├── chat.py                   # 聊天数据模型
+│   │   ├── knowledge.py              # 知识库数据模型
+│   │   └── tool.py                   # 工具数据模型
+│   │
+│   ├── integrations/                 # 外部集成
+│   │   └── mcp_client.py             # MCP 客户端
+│   │
+│   ├── static/                       # 静态资源
+│   │   ├── favicon.ico               # 网站图标
+│   │   ├── logo.jpg                  # 系统 Logo
+│   │   └── default-avatar.jpg        # 默认头像
+│   │
+│   └── tests/                        # 测试用例
+│       ├── conftest.py               # 测试配置
+│       ├── unit/                     # 单元测试
+│       └── integration/              # 集成测试
 │
-├── agent/                           # Agent 编排引擎
-│   ├── state.py                     #  LangGraph 状态定义
-│   ├── nodes.py                     #  Agent 节点实现
-│   └── graph.py                     #  LangGraph StateGraph 流水线
-│
-├── api/                             # REST API 路由
-│   ├── route.py                     #  聊天与工具接口
-│   ├── auth_route.py                #  认证相关接口
-│   └── admin_route.py               #  管理后台接口
-│
-├── tools/                           # 工具层实现
-│   ├── base.py                      #  工具基类与注册表
-│   ├── search_tool.py               #  网络搜索
-│   ├── code_tool.py                 #  Python 代码执行
-│   ├── file_tool.py                 #  文件读写
-│   ├── browser_tool.py              #  网页抓取
-│   └── knowledge_tool.py            #  RAG 知识检索
-│
-├── memory/                          # 记忆模块
-│   ├── chat_memory.py               #  聊天历史（滑动窗口）
-│   └── vector_memory.py             #  向量长期记忆
-│
-├── services/                        # 业务服务层
-│   ├── llm_service.py               #  LLM 客户端（多供应商）
-│   ├── chat_service.py              #  聊天业务编排
-│   └── knowledge_service.py         #  知识库服务
-│
-├── frontend/                        # React SPA
+├── frontend/                         # React SPA
 │   ├── src/
-│   │   ├── pages/                   #  页面组件
-│   │   ├── components/              #  共享组件
-│   │   ├── stores/                  #  Zustand 状态管理
-│   │   ├── api/                     #  API 调用封装
-│   │   └── styles/                  #  全局样式
+│   │   ├── pages/                    # 页面组件
+│   │   ├── components/               # 共享组件
+│   │   ├── stores/                   # Zustand 状态管理
+│   │   ├── api/                      # API 调用封装
+│   │   └── styles/                   # 全局样式
 │   └── vite.config.ts
 │
-├── database/                        # 数据库层
-│   ├── db.py                        #  会话与引擎配置
-│   ├── tables.py                    #  SQLAlchemy 模型
-│   ├── init_mysql.sql               #  数据库初始化脚本
-│   └── migrate.sql                  #  迁移脚本
-│
-├── config/                          # 全局配置
-│   └── settings.py                  #  Pydantic 配置类
-│
-├── utils/                           # 通用工具
-│   ├── auth.py                      #  JWT、密码哈希
-│   ├── exception.py                 #  错误码与异常处理
-│   ├── logger.py                    #  日志配置
-│   └── common.py                    #  通用函数
-│
-├── schemas/                         #  Pydantic 数据模型
-├── scripts/                         #  启停与诊断脚本
-├── static/                          #  静态资源
-├── data/                            #  本地数据与上传文件
-├── logs/                            #  日志文件
-│
-├── tests/                           #  测试用例
-│   ├── unit/                        #  单元测试
-│   └── integration/                 #  集成测试
-│
-├── requirements.txt
-│
-├── docker-compose.yml                 # Docker 编排
-└── .env.example
+├── data/                             # 本地数据与上传文件
+│   ├── uploads/
+│   └── vector_store/
+├── logs/                             # 日志文件
+├── docker-compose.yml                # Docker 编排
+├── .env.example                      # 环境变量模板
+└── .gitignore                        # Git 忽略规则
 ```
 
 ---

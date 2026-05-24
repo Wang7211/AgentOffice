@@ -46,3 +46,7 @@ frontend/.vite/
 
 # Memory
 .claude/
+
+# Build artifacts
+tsconfig.tsbuildinfo
+backend/data/vector_store/
