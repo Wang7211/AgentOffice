@@ -245,7 +245,7 @@ AgentOffice/
 │   │   └── admin_route.py            # 管理后台接口
 │   │
 │   ├── services/                     # 业务服务层
-│   │   ├── llm_service.py            # LLM 客户端（多供应商）
+│   │   ├── llm_service.py            # LLM 客户端
 │   │   ├── chat_service.py           # 聊天业务编排
 │   │   ├── knowledge_service.py      # 知识库服务
 │   │   ├── tool_service.py           # 工具注册与调度
