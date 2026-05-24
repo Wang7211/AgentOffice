@@ -1,0 +1,141 @@
+"""共享的测试 fixtures 和配置。"""
+
+import json
+import os
+from pathlib import Path
+from typing import Any
+from typing import Generator
+
+import pytest
+from pytest import MonkeyPatch
+
+# ---------------------------------------------------------------------------
+# 环境变量：测试期间使用本地规则模型，不依赖外部 API
+# ---------------------------------------------------------------------------
+
+_TEST_ENV_VARS = {
+    "APP_ENV": "test",
+    "MODEL_PROVIDER": "local",
+    "DATABASE_URL": "sqlite:///file:test.db?mode=memory&cache=shared&uri=true",
+    "REDIS_URL": "",
+    "TAVILY_API_KEY": "",
+    "OPENAI_API_KEY": "",
+    "DEEPSEEK_API_KEY": "",
+    "QWEN_API_KEY": "",
+    "JWT_SECRET_KEY": "test-secret-key-for-testing-purposes-only!",
+}
+
+
+@pytest.fixture(autouse=True)
+def _setup_test_env(monkeypatch: MonkeyPatch) -> None:
+    """自动为每个测试设置测试环境变量并清除 Settings 缓存。"""
+    for key, value in _TEST_ENV_VARS.items():
+        monkeypatch.setenv(key, value)
+    # 清除缓存以使 Settings 重新从环境变量加载
+    from config.settings import get_settings as _gs
+
+    _gs.cache_clear()
+    _gs()
+
+
+@pytest.fixture
+def temp_data_dir(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
+    """临时数据目录，避免测试污染真实文件系统。"""
+    project_root = tmp_path / "project"
+    data_dir = project_root / "data"
+    (data_dir / "uploads").mkdir(parents=True)
+    (data_dir / "vector_store").mkdir(parents=True)
+    (project_root / "logs").mkdir(parents=True)
+
+    # 让 Settings 将 PROJECT_ROOT 指向临时目录
+    monkeypatch.setattr("config.settings.PROJECT_ROOT", project_root)
+    # 清除 Settings 缓存使其重新从环境变量加载
+    monkeypatch.setattr("config.settings.get_settings.cache_clear", lambda: None)
+    from config.settings import get_settings as _get_settings
+
+    _get_settings.cache_clear()
+    settings = _get_settings()
+    return data_dir
+
+
+@pytest.fixture
+def sample_vector_index(temp_data_dir: Path) -> Path:
+    """创建一个带若干条目的测试用向量索引文件。"""
+    index_path = temp_data_dir / "vector_store" / "knowledge_index.json"
+    data = {
+        "vec_001": {
+            "text": "企业碳足迹管理包括范围一、范围二和范围三排放。",
+            "metadata": {"file_name": "碳足迹手册.pdf", "document_category": "compliance"},
+            "vector": [],
+        },
+        "vec_002": {
+            "text": "欧盟电池法规(EU)2023/1542 要求电池产品提供碳足迹声明。",
+            "metadata": {"file_name": "欧盟法规.pdf", "document_category": "compliance"},
+            "vector": [],
+        },
+        "vec_003": {
+            "text": "旅游景点门票价格通常在 50-200 元之间。",
+            "metadata": {"file_name": "旅游指南.pdf", "document_category": "travel"},
+            "vector": [],
+        },
+    }
+    index_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return index_path
+
+
+@pytest.fixture
+def sample_agent_memory_index(temp_data_dir: Path) -> Path:
+    """创建 Agent 长期记忆索引文件。"""
+    index_path = temp_data_dir / "vector_store" / "agent_memory_index.json"
+    data = {
+        "mem_001": {
+            "text": "用户偏好使用 Markdown 格式输出报告。",
+            "metadata": {"memory_type": "agent_task_experience"},
+            "vector": [],
+        },
+    }
+    index_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return index_path
+
+
+@pytest.fixture
+def sample_pdf(tmp_path: Path) -> Path:
+    """创建一个简短的 PDF 测试文件。"""
+    import fitz
+
+    file_path = tmp_path / "test.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((50, 100), "Hello AgentOffice PDF Test")
+    doc.save(str(file_path))
+    doc.close()
+    return file_path
+
+
+@pytest.fixture
+def sample_txt(tmp_path: Path) -> Path:
+    """创建一个 TXT 测试文件。"""
+    file_path = tmp_path / "test.txt"
+    file_path.write_text("Hello AgentOffice TXT Test\n第二行内容", encoding="utf-8")
+    return file_path
+
+
+# ---------------------------------------------------------------------------
+# 模拟注册表工具
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clear_tool_registry_cache():
+    """清除工具注册表缓存，避免测试间互相干扰。"""
+    from services import tool_service
+
+    tool_service.get_tool_registry.cache_clear()
+
+
+@pytest.fixture
+def _clear_settings_cache():
+    """清除 Settings 缓存。"""
+    from config import settings
+
+    settings.get_settings.cache_clear()
