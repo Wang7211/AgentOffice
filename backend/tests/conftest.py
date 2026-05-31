@@ -1,10 +1,6 @@
 """共享的测试 fixtures 和配置。"""
 
-import json
-import os
 from pathlib import Path
-from typing import Any
-from typing import Generator
 
 import pytest
 from pytest import MonkeyPatch
@@ -18,7 +14,6 @@ _TEST_ENV_VARS = {
     "MODEL_PROVIDER": "local",
     "DATABASE_URL": "sqlite:///file:test.db?mode=memory&cache=shared&uri=true",
     "REDIS_URL": "",
-    "TAVILY_API_KEY": "",
     "OPENAI_API_KEY": "",
     "DEEPSEEK_API_KEY": "",
     "QWEN_API_KEY": "",
@@ -56,46 +51,6 @@ def temp_data_dir(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     _get_settings.cache_clear()
     settings = _get_settings()
     return data_dir
-
-
-@pytest.fixture
-def sample_vector_index(temp_data_dir: Path) -> Path:
-    """创建一个带若干条目的测试用向量索引文件。"""
-    index_path = temp_data_dir / "vector_store" / "knowledge_index.json"
-    data = {
-        "vec_001": {
-            "text": "企业碳足迹管理包括范围一、范围二和范围三排放。",
-            "metadata": {"file_name": "碳足迹手册.pdf", "document_category": "compliance"},
-            "vector": [],
-        },
-        "vec_002": {
-            "text": "欧盟电池法规(EU)2023/1542 要求电池产品提供碳足迹声明。",
-            "metadata": {"file_name": "欧盟法规.pdf", "document_category": "compliance"},
-            "vector": [],
-        },
-        "vec_003": {
-            "text": "旅游景点门票价格通常在 50-200 元之间。",
-            "metadata": {"file_name": "旅游指南.pdf", "document_category": "travel"},
-            "vector": [],
-        },
-    }
-    index_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return index_path
-
-
-@pytest.fixture
-def sample_agent_memory_index(temp_data_dir: Path) -> Path:
-    """创建 Agent 长期记忆索引文件。"""
-    index_path = temp_data_dir / "vector_store" / "agent_memory_index.json"
-    data = {
-        "mem_001": {
-            "text": "用户偏好使用 Markdown 格式输出报告。",
-            "metadata": {"memory_type": "agent_task_experience"},
-            "vector": [],
-        },
-    }
-    index_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return index_path
 
 
 @pytest.fixture

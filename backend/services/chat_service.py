@@ -13,10 +13,40 @@ from database.tables import ChatRecord
 from database.tables import ChatSession
 from database.tables import ToolRecord
 from memory.store import chat_memory
+from memory.store import redis_kv
 from utils.common import generate_uuid
 from utils.exception import ParameterException
 from utils.structured_log import log_agent_event
 from utils.structured_log import preview_text
+
+
+_SESSION_CACHE_TTL = 3600  # 会话缓存 1 小时
+
+
+class _CachedSession:
+    """Redis 会话缓存的轻量代理。"""
+
+    def __init__(self, data: dict) -> None:
+        self.session_id = data["session_id"]
+        self.model_name = data.get("model_name", "")
+
+
+def _cache_session(session: ChatSession) -> None:
+    """将会话写入 Redis 缓存。"""
+    redis_kv.set(
+        f"session:{session.session_id}",
+        {
+            "session_id": session.session_id,
+            "user_id": session.user_id,
+            "session_name": session.session_name,
+            "model_name": session.model_name,
+            "is_delete": session.is_delete,
+            "update_time": (
+                session.update_time.isoformat() if session.update_time else ""
+            ),
+        },
+        ttl=_SESSION_CACHE_TTL,
+    )
 
 
 class ChatService:
@@ -77,6 +107,14 @@ class ChatService:
                 content_preview=preview_text(message),
             )
             recent_history = chat_memory.get_recent(session.session_id)
+
+            # ── 注入 Redis 缓存的上下文摘要 ────────────────────────
+            summary = redis_kv.get(f"summary:{session.session_id}")
+            if summary:
+                recent_history = [
+                    {"role": "system", "content": f"【历史对话摘要】{summary}"},
+                ] + recent_history
+
             chat_memory.append(session.session_id, "user", message)
             agent_result = self._agent_graph.run(
                 user_message=message,
@@ -107,6 +145,7 @@ class ChatService:
                 has_tool_result=bool(agent_result.get("tool_result")),
                 total_duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
             )
+            citations = self._extract_citations(agent_result)
             return {
                 "session_id": session.session_id,
                 "message_id": assistant_record.id,
@@ -116,6 +155,7 @@ class ChatService:
                 "tool_calls": agent_result.get("tool_calls", []),
                 "plan": agent_result.get("plan", []),
                 "reflection": agent_result.get("reflection", {}),
+                "citations": citations,
             }
         except Exception as exc:
             self._db_session.rollback()
@@ -128,6 +168,36 @@ class ChatService:
                 total_duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
             )
             raise
+
+    @staticmethod
+    def _extract_citations(agent_result: dict[str, object]) -> list[dict[str, str]]:
+        """从 agent 结果中提取知识库引用文档列表。"""
+        tool_calls = agent_result.get("tool_calls") or []
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return []
+        seen: set[str] = set()
+        citations: list[dict[str, str]] = []
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            if tc.get("tool_name") != "knowledge":
+                continue
+            metadata = tc.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                continue
+            matches = metadata.get("matches") or []
+            if not isinstance(matches, list):
+                continue
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                file_name = str(match.get("metadata", {}).get("file_name", "") or "")
+                if not file_name:
+                    file_name = str(match.get("file_name", ""))
+                if file_name and file_name not in seen:
+                    seen.add(file_name)
+                    citations.append({"file_name": file_name})
+        return citations
 
     async def stream_chat(
         self,
@@ -149,13 +219,21 @@ class ChatService:
             ParameterException: 消息为空时抛出。
         """
         result = await self.complete_chat(message, session_id, user_id)
-        meta_data = json.dumps({"session_id": result["session_id"]})
+        meta_data = json.dumps({
+            "session_id": result["session_id"],
+            "citations": result.get("citations", []),
+            "tool_name": result.get("tool_name"),
+        })
         yield f"event: meta\ndata: {meta_data}\n\n"
         answer = str(result["answer"])
         # 逐字输出，实现打字机效果
         for char in answer:
             yield f"event: message\ndata: {json.dumps({'content': char})}\n\n"
-        yield "event: done\ndata: {}\n\n"
+        done_data = json.dumps({
+            "citations": result.get("citations", []),
+            "tool_name": result.get("tool_name"),
+        })
+        yield f"event: done\ndata: {done_data}\n\n"
 
     def history(self, session_id: str | None = None) -> list[dict[str, object]]:
         """返回聊天历史。
@@ -186,11 +264,17 @@ class ChatService:
         user_id: int,
         message: str,
     ) -> ChatSession:
-        """获取已有会话或创建新会话。"""
+        """获取已有会话或创建新会话（带 Redis 缓存）。"""
         settings = get_settings()
         if session_id:
+            # 1) Redis 缓存查询
+            cached = redis_kv.get(f"session:{session_id}")
+            if cached and not cached.get("is_delete"):
+                return _CachedSession(cached)  # type: ignore[return-value]
+            # 2) MySQL 兜底
             session = self._db_session.get(ChatSession, session_id)
             if session and session.is_delete == 0:
+                _cache_session(session)
                 return session
         new_session = ChatSession(
             session_id=generate_uuid(),
@@ -200,6 +284,7 @@ class ChatService:
         )
         self._db_session.add(new_session)
         self._db_session.flush()
+        _cache_session(new_session)
         return new_session
 
     def _create_record(
@@ -349,6 +434,7 @@ class ChatService:
             raise ParameterException("会话不存在")
         session.session_name = session_name
         self._db_session.commit()
+        redis_kv.delete(f"session:{session_id}")
         return self._session_to_dict(session)
 
     def delete_session(self, session_id: str) -> dict[str, object]:
@@ -368,4 +454,5 @@ class ChatService:
             raise ParameterException("会话不存在")
         session.is_delete = 1
         self._db_session.commit()
+        redis_kv.delete(f"session:{session_id}")
         return {"session_id": session_id}

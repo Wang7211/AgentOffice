@@ -33,7 +33,7 @@ import {
   deleteSession as deleteSessionApi,
   streamChat,
 } from '../api/chat';
-import type { ChatSession, ChatRecord } from '../api/chat';
+import type { ChatSession, ChatRecord, Citation } from '../api/chat';
 
 const { Text } = Typography;
 const PENDING_SESSION_PREFIX = '__pending_session__';
@@ -47,6 +47,8 @@ export default function Chat() {
     messages,
     streaming,
     streamingContent,
+    citations,
+    setCitations,
     setSessions,
     setCurrentSession,
     setMessages,
@@ -160,6 +162,7 @@ export default function Chat() {
     if (sending) return;
     setCurrentSession(null);
     clearStreaming();
+    setCitations([]);
     setInputValue('');
   };
 
@@ -167,6 +170,7 @@ export default function Chat() {
     if (sending) return;
     setCurrentSession(session.session_id);
     clearStreaming();
+    setCitations([]);
   };
 
   const handleSend = async () => {
@@ -176,6 +180,7 @@ export default function Chat() {
     setInputValue('');
     setSending(true);
     clearStreaming();
+    setCitations([]);
     charQueueRef.current = [];
     pendingHistorySessionIdRef.current = null;
     setStreaming(true);
@@ -221,9 +226,15 @@ export default function Chat() {
             loadSessions();
           }
         }
+        if (meta.citations && Array.isArray(meta.citations)) {
+          setCitations(meta.citations as Citation[]);
+        }
       },
-      () => {
+      (data) => {
         setSending(false);
+        if (data && data.citations && Array.isArray(data.citations)) {
+          setCitations(data.citations as Citation[]);
+        }
         // Mark stream completed; timer will drain the queue naturally
         pendingHistorySessionIdRef.current = targetSessionId;
         streamCompletedRef.current = true;
@@ -513,6 +524,36 @@ export default function Chat() {
                   </div>
                 </div>
               )}
+
+              {/* Knowledge citations */}
+              {!streaming && citations.length > 0 && (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '10px 16px',
+                    margin: '0 0 12px 0',
+                    fontSize: 13,
+                    color: 'var(--gray-500)',
+                    background: 'var(--gray-50)',
+                    borderRadius: 8,
+                    border: '1px solid var(--gray-100)',
+                  }}
+                >
+                  <span style={{ flexShrink: 0 }}>📄</span>
+                  <span>
+                    引用知识库中的{' '}
+                    {citations.map((c, i) => (
+                      <span key={c.file_name}>
+                        {i > 0 && '、'}
+                        <strong style={{ color: 'var(--primary-color)' }}>{c.file_name}</strong>
+                      </span>
+                    ))}
+                  </span>
+                </div>
+              )}
+
               <div ref={messagesEndRef} />
             </div>
 

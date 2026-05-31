@@ -16,6 +16,10 @@ export interface ChatRecord {
   create_time: string;
 }
 
+export interface Citation {
+  file_name: string;
+}
+
 export interface ChatResult {
   session_id: string;
   message_id: number;
@@ -25,6 +29,7 @@ export interface ChatResult {
   tool_calls?: any[];
   plan?: any[];
   reflection?: any;
+  citations?: Citation[];
 }
 
 export async function listSessions(
@@ -67,7 +72,7 @@ export function streamChat(
   userId: number,
   onMessage: (content: string) => void,
   onMeta: (data: any) => void,
-  onDone: () => void,
+  onDone: (data?: any) => void,
   onError: (error: Error) => void,
 ): AbortController {
   const controller = new AbortController();
@@ -119,7 +124,7 @@ export function streamChat(
               } else if (currentEvent === 'message') {
                 onMessage(data.content || '');
               } else if (currentEvent === 'done') {
-                onDone();
+                onDone(data);
               }
             } catch {
               // ignore parse errors for partial chunks

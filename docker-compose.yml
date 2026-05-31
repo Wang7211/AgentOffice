@@ -32,12 +32,27 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    container_name: agent-office-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   agent-office:
-    build: ./backend
+    build: .
     container_name: agent-office
     env_file: .env
     environment:
       DATABASE_URL: mysql+pymysql://agentoffice:agentoffice123@mysql:3306/agentoffice?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
     volumes:
@@ -46,6 +61,9 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      redis:
+        condition: service_started
 
 volumes:
   mysql_data:
+  redis_data:

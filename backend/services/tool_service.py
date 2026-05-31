@@ -8,9 +8,10 @@ from services.mcp_service import discover_mcp_tools
 from tools.base import ToolRegistry
 from tools.browser_tool import BrowserTool
 from tools.code_tool import CodeTool
+from tools.email_tool import EmailTool
 from tools.file_tool import FileTool
 from tools.knowledge_tool import KnowledgeTool
-from tools.search_tool import SearchTool
+from tools.weather_tool import WeatherTool
 from tools.time_tool import TimeTool
 
 
@@ -25,7 +26,8 @@ def get_tool_registry() -> ToolRegistry:
         ToolException: 工具重复注册时抛出。
     """
     registry = ToolRegistry()
-    registry.register(SearchTool())
+    registry.register(WeatherTool())
+    registry.register(EmailTool())
     registry.register(CodeTool())
     registry.register(FileTool())
     registry.register(TimeTool())

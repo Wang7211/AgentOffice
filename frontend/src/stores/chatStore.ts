@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ChatSession, ChatRecord } from '../api/chat';
+import type { ChatSession, ChatRecord, Citation } from '../api/chat';
 
 interface ChatState {
   sessions: ChatSession[];
@@ -9,6 +9,7 @@ interface ChatState {
   loading: boolean;
   streaming: boolean;
   streamingContent: string;
+  citations: Citation[];
   setSessions: (sessions: ChatSession[]) => void;
   setCurrentSession: (sessionId: string | null) => void;
   setMessages: (sessionId: string, messages: ChatRecord[]) => void;
@@ -18,6 +19,7 @@ interface ChatState {
   finishStreaming: (sessionId?: string, messages?: ChatRecord[]) => void;
   setLoading: (loading: boolean) => void;
   setStreaming: (streaming: boolean) => void;
+  setCitations: (citations: Citation[]) => void;
   removeSession: (sessionId: string) => void;
   updateSessionName: (sessionId: string, name: string) => void;
   addSession: (session: ChatSession) => void;
@@ -31,6 +33,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   loading: false,
   streaming: false,
   streamingContent: '',
+  citations: [],
 
   setSessions: (sessions) => set({ sessions }),
 
@@ -91,6 +94,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   setLoading: (loading) => set({ loading }),
 
   setStreaming: (streaming) => set({ streaming }),
+
+  setCitations: (citations) => set({ citations }),
 
   removeSession: (sessionId) => {
     set((state) => {

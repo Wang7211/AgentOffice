@@ -33,7 +33,6 @@ class Settings(BaseSettings):
         qwen_api_key: 环境变量中的通义千问密钥。
         qwen_base_url: 通义千问 OpenAI 兼容接口地址。
         qwen_model: 通义千问默认模型名称。
-        tavily_api_key: 环境变量中的 Tavily 搜索密钥。
         upload_dir: 知识库上传文件目录。
         vector_store_dir: 本地向量索引目录。
         max_upload_mb: 上传文件最大体积，单位 MB。
@@ -42,6 +41,11 @@ class Settings(BaseSettings):
         agent_memory_similarity_threshold: Agent 长期记忆最低相似度。
         request_timeout: 外部请求超时时间，单位秒。
         cors_origins: 允许跨域访问的来源列表。
+        smtp_host: SMTP 邮件服务器地址。
+        smtp_port: SMTP 邮件服务器端口。
+        smtp_username: SMTP 登录用户名。
+        smtp_password: SMTP 登录密码。
+        smtp_from_email: 发件人邮箱地址。
     """
 
     model_config = SettingsConfigDict(
@@ -69,17 +73,22 @@ class Settings(BaseSettings):
     qwen_api_key: str = Field(default="", repr=False)
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     qwen_model: str = "qwen-plus"
-    tavily_api_key: str = Field(default="", repr=False)
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
     vector_store_dir: Path = PROJECT_ROOT / "data" / "vector_store"
     max_upload_mb: int = 20
     chat_window_size: int = 10
     knowledge_similarity_threshold: float = 0.25
     agent_memory_similarity_threshold: float = 0.15
-    request_timeout: float = 15.0
+    request_timeout: float = 30.0
     cors_origins: list[str] = ["*"]
+    milvus_uri: str = ""
     mcp_http_endpoint: str = ""
     mcp_api_key: str = Field(default="", repr=False)
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = Field(default="", repr=False)
+    smtp_password: str = Field(default="", repr=False)
+    smtp_from_email: str = ""
     jwt_secret_key: str = Field(
         default="agentoffice-secret-key-change-in-production",
         repr=False,

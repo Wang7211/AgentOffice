@@ -24,6 +24,7 @@ class ChatCompletionResponse(BaseModel):
     tool_calls: list[dict[str, object]] | None = None
     plan: list[dict[str, object]] | None = None
     reflection: dict[str, object] | None = None
+    citations: list[dict[str, str]] | None = None
 
 
 class ChatHistoryRequest(BaseModel):

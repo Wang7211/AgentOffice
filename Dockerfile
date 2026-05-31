@@ -4,7 +4,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONIOENCODING=UTF-8
 ENV PIP_NO_CACHE_DIR=1
 
-WORKDIR /app
+WORKDIR /app/backend
 
 # Install system dependencies needed by faiss-cpu
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -12,10 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir "pymilvus[milvus_lite]>=2.4.0"
 
-COPY . /app/backend
+COPY backend/ .
 
 EXPOSE 8000
 
-CMD ["python", "/app/backend/main.py"]
+CMD ["python", "main.py"]

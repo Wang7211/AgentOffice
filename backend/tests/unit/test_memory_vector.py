@@ -1,118 +1,164 @@
-"""LocalVectorMemory 本地向量存储测试。"""
+"""MilvusMemory + RedisKV 存储层测试（mock 外部依赖）。"""
 
-import json
-import math
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
-from memory.vector_memory import LocalVectorMemory
+from memory.vector_memory import MilvusMemory
+from memory.vector_memory import RedisKV
 
 
-class TestLocalVectorMemory:
-    def test_add_and_search(self, temp_data_dir: Path) -> None:
-        mem = LocalVectorMemory("test_index.json")
-        mem.add_text(
-            vector_id="v1",
-            text="Python 是一种编程语言",
-            metadata={"source": "manual"},
-        )
-        mem.add_text(
-            vector_id="v2",
-            text="Java 也是一种编程语言",
-            metadata={"source": "manual"},
-        )
-        mem.add_text(
-            vector_id="v3",
-            text="今天的天气非常好",
-            metadata={"source": "manual"},
-        )
-        results = mem.search("编程语言", top_k=2)
-        assert len(results) == 2
-        assert results[0]["score"] >= 0.0
-        # "编程语言" 应比 "天气" 更匹配
-        v1_score = next(r["score"] for r in results if r["vector_id"] == "v1")
-        v3 = next((r for r in results if r["vector_id"] == "v3"), None)
-        assert v1_score >= (v3["score"] if v3 else 0.0)
+class TestMilvusMemory:
+    """MilvusMemory 接口测试（mock MilvusClient）。"""
 
-    def test_search_filtered_with_min_score(self, temp_data_dir: Path) -> None:
-        mem = LocalVectorMemory("test_min_score.json")
-        mem.add_text("v1", "苹果是一种水果", {})
-        mem.add_text("v2", "苹果公司发布新款手机", {})
-        results = mem.search_filtered("苹果", top_k=5, min_score=0.5)
-        assert all(r["score"] >= 0.5 for r in results)
+    @mock.patch("memory.vector_memory.MilvusClient")
+    def test_add_text(self, mock_client_cls: mock.MagicMock) -> None:
+        mem = MilvusMemory("test_coll")
+        mem.add_text("v1", "你好世界", {"source": "manual"})
+        call_kwargs = mock_client_cls.return_value.insert.call_args
+        assert call_kwargs is not None
+        args, _ = call_kwargs
+        assert args[0] == "test_coll"
+        data = args[1]
+        assert data["id"] == "v1"
+        assert data["text"] == "你好世界"
+        assert data["source"] == "manual"
+        assert "vector" in data
 
-    def test_search_filtered_with_metadata_filter(self, temp_data_dir: Path) -> None:
-        mem = LocalVectorMemory("test_metadata.json")
-        mem.add_text("v1", "合规文档内容", {"category": "compliance"})
-        mem.add_text("v2", "普通文档内容", {"category": "general"})
-        results = mem.search_filtered(
-            "文档", top_k=5, metadata_filter={"category": "compliance"}
-        )
-        assert all(r["metadata"]["category"] == "compliance" for r in results)
-
-    def test_delete(self, temp_data_dir: Path) -> None:
-        mem = LocalVectorMemory("test_delete.json")
-        mem.add_text("v1", "内容1", {})
-        mem.add_text("v2", "内容2", {})
-        assert len(mem.search("内容", top_k=10)) == 2
-        mem.delete(["v1"])
-        results = mem.search("内容", top_k=10)
+    @mock.patch("memory.vector_memory.MilvusClient")
+    def test_search_delegates_to_search_filtered(
+        self, mock_client_cls: mock.MagicMock
+    ) -> None:
+        mem = MilvusMemory("test_coll")
+        mock_client_cls.return_value.search.return_value = [
+            [
+                {
+                    "id": "v1",
+                    "distance": 0.92,
+                    "entity": {"text": "test", "source": "manual"},
+                }
+            ]
+        ]
+        results = mem.search("hello")
         assert len(results) == 1
-        assert results[0]["vector_id"] == "v2"
+        assert results[0]["vector_id"] == "v1"
 
-    def test_empty_index_returns_empty(self, temp_data_dir: Path) -> None:
-        mem = LocalVectorMemory("empty.json")
-        assert mem.search("任何内容") == []
+    @mock.patch("memory.vector_memory.MilvusClient")
+    def test_search_filtered_with_min_score(
+        self, mock_client_cls: mock.MagicMock
+    ) -> None:
+        mem = MilvusMemory("test_coll")
+        mock_client_cls.return_value.search.return_value = [
+            [
+                {
+                    "id": "v1",
+                    "distance": 0.92,
+                    "entity": {"text": "high score", "cat": "a"},
+                },
+                {
+                    "id": "v2",
+                    "distance": 0.30,
+                    "entity": {"text": "low score", "cat": "b"},
+                },
+            ]
+        ]
+        results = mem.search_filtered("query", min_score=0.5)
+        assert len(results) == 1
+        assert results[0]["vector_id"] == "v1"
 
-    def test_empty_text_returns_zero_vector(self) -> None:
-        mem = LocalVectorMemory("_dummy.json")
-        vector = mem._embed_text("")
-        assert all(v == 0.0 for v in vector)
+    @mock.patch("memory.vector_memory.MilvusClient")
+    def test_search_filtered_with_metadata(
+        self, mock_client_cls: mock.MagicMock
+    ) -> None:
+        mem = MilvusMemory("test_coll")
+        mock_client_cls.return_value.search.return_value = [
+            [
+                {
+                    "id": "v1",
+                    "distance": 0.85,
+                    "entity": {"text": "doc", "category": "compliance"},
+                }
+            ]
+        ]
+        results = mem.search_filtered(
+            "query", metadata_filter={"category": "compliance"}
+        )
+        # 验证 filter 表达式被传入
+        call_args = mock_client_cls.return_value.search.call_args
+        assert call_args is not None
+        kwargs = call_args[1]
+        assert "category" in kwargs.get("filter", "")
 
-    def test_embed_text_normalized(self) -> None:
-        mem = LocalVectorMemory("_dummy2.json")
-        v1 = mem._embed_text("hello world")
-        v2 = mem._embed_text("HELLO WORLD")
-        # 相同文本因小写化应产生相同向量
+    @mock.patch("memory.vector_memory.MilvusClient")
+    def test_delete(self, mock_client_cls: mock.MagicMock) -> None:
+        mem = MilvusMemory("test_coll")
+        mem.delete(["v1", "v2"])
+        mock_client_cls.return_value.delete.assert_called_with(
+            "test_coll", ["v1", "v2"]
+        )
+
+    @mock.patch("memory.vector_memory.MilvusClient")
+    def test_empty_index_returns_empty(
+        self, mock_client_cls: mock.MagicMock
+    ) -> None:
+        mem = MilvusMemory("empty_coll")
+        mock_client_cls.return_value.search.return_value = [[]]
+        assert mem.search("anything") == []
+
+    def test_embed_identical_texts(self) -> None:
+        """同一文本应产生相同向量。"""
+        mem = MilvusMemory("_dummy")
+        v1 = mem._embed("hello world")
+        v2 = mem._embed("HELLO WORLD")
         assert v1 == v2
 
-    def test_cosine_similarity_identical(self) -> None:
-        mem = LocalVectorMemory("_dummy3.json")
-        vector = [0.6, 0.8]
-        similarity = mem._cosine_similarity(vector, vector)
-        assert abs(similarity - 1.0) < 1e-10
-
-    def test_cosine_similarity_orthogonal(self) -> None:
-        mem = LocalVectorMemory("_dummy4.json")
-        similarity = mem._cosine_similarity([1.0, 0.0], [0.0, 1.0])
-        assert abs(similarity) < 1e-10
-
-    def test_tokenize_cjk_generates_unigram_bigram(self) -> None:
-        mem = LocalVectorMemory("_dummy5.json")
-        tokens = mem._tokenize("你好世界")
-        assert "你" in tokens
-        assert "好" in tokens
-        assert "你好" in tokens
-        assert "好世" in tokens
-        assert len(tokens) == 7  # 4 unigram + 3 bigram
-
-    def test_tokenize_mixed_content(self) -> None:
-        mem = LocalVectorMemory("_dummy6.json")
-        tokens = mem._tokenize("hello 你好 world")
-        assert "hello" in tokens
-        assert "world" in tokens
-        assert "你" in tokens
-        assert "你好" in tokens
-
-    def test_normalize_vector(self) -> None:
-        mem = LocalVectorMemory("_dummy7.json")
-        result = mem._normalize_vector([3.0, 4.0])
-        assert abs(result[0] - 0.6) < 1e-10
-        assert abs(result[1] - 0.8) < 1e-10
+    def test_embed_empty_string(self) -> None:
+        mem = MilvusMemory("_dummy")
+        vector = mem._embed("")
+        assert all(v == 0.0 for v in vector)
 
     def test_normalize_zero_vector(self) -> None:
-        mem = LocalVectorMemory("_dummy8.json")
+        mem = MilvusMemory("_dummy")
         result = mem._normalize_vector([0.0, 0.0])
         assert result == [0.0, 0.0]
+
+    def test_tokenize_cjk(self) -> None:
+        mem = MilvusMemory("_dummy")
+        tokens = mem._tokenize("你好世界")
+        assert "你" in tokens
+        assert "你好" in tokens
+        assert "好世" in tokens
+        assert len(tokens) == 7
+
+    def test_tokenize_mixed(self) -> None:
+        mem = MilvusMemory("_dummy")
+        tokens = mem._tokenize("hello 你好 world")
+        assert "hello" in tokens
+        assert "你" in tokens
+
+    def test_build_filter_expr_simple(self) -> None:
+        mem = MilvusMemory("_dummy")
+        expr = mem._build_filter_expr({"cat": "a"})
+        assert 'cat ==' in expr
+        assert "a" in expr
+
+    def test_build_filter_expr_list(self) -> None:
+        mem = MilvusMemory("_dummy")
+        expr = mem._build_filter_expr({"status": ["ok", "pending"]})
+        assert "in" in expr
+        assert "ok" in expr or "'ok'" in expr or '"ok"' in expr
+
+
+class TestRedisKV:
+    """RedisKV 接口测试（mock Redis 不可用场景）。"""
+
+    def test_redis_unavailable_returns_none(self) -> None:
+        kv = RedisKV()
+        # Redis 不可用时各方法静默降级
+        assert kv.get("any_key") is None
+        assert kv.exists("any_key") is False
+        # set / delete 不应抛出
+        kv.set("k", "v")
+        kv.delete("k")

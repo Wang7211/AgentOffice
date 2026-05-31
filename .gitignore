@@ -49,4 +49,5 @@ frontend/.vite/
 
 # Build artifacts
 tsconfig.tsbuildinfo
+backend/backend.err
 backend/data/vector_store/

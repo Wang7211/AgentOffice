@@ -1,29 +1,49 @@
-"""本地向量记忆，用作轻量 Milvus 兼容适配器。"""
+"""基于 Milvus + Redis 的混合记忆存储。
+
+架构：
+  - Milvus（Milvus Lite 本地文件 / 远程服务）
+    存储非结构化文本的语义向量，负责相似性检索。
+  - Redis
+    存储用户 ID、会话 ID 等低延迟访问的元数据。
+"""
 
 import json
 import math
 from typing import Any
 
+import redis as redis_py
+from loguru import logger
+from pymilvus import DataType
+from pymilvus import MilvusClient
+
 from config.settings import get_settings
 from utils.common import text_hash
 
-
-try:
-    from langchain_core.embeddings import Embeddings
-except ImportError:
-    class Embeddings:  # type: ignore[no-redef]
-        """LangChain 未安装时的占位基类。"""
+VECTOR_DIMENSION = 1024
 
 
-class LocalVectorMemory:
-    """面向本地开发的 JSON 向量存储。"""
+class MilvusMemory:
+    """基于 Milvus 的向量记忆，支持语义检索与元数据过滤。
 
-    vector_dimension = 1024
+    使用 Milvus Lite（本地文件）或连接远程 Milvus 服务。
+    """
 
-    def __init__(self, index_name: str = "knowledge_index.json") -> None:
+    def __init__(self, collection_name: str = "knowledge") -> None:
         settings = get_settings()
-        self._index_path = settings.vector_store_dir / index_name
-        self._index_path.parent.mkdir(parents=True, exist_ok=True)
+        self._collection_name = collection_name
+        milvus_uri = (
+            settings.milvus_uri
+            or str(settings.vector_store_dir / "milvus.db")
+        )
+        self._client = MilvusClient(
+            milvus_uri,
+            grpc_options=[("grpc.keepalive_time_ms", 60000)],
+        )
+        self._ensure_collection()
+
+    # ------------------------------------------------------------------
+    # 公开接口
+    # ------------------------------------------------------------------
 
     def add_text(
         self,
@@ -31,40 +51,20 @@ class LocalVectorMemory:
         text: str,
         metadata: dict[str, Any],
     ) -> None:
-        """新增或更新一个文本向量。
-
-        参数:
-            vector_id: 稳定向量标识。
-            text: 原始文本分片。
-            metadata: 与分片关联的元数据。
-
-        返回:
-            无。
-
-        异常:
-            OSError: 索引文件无法写入时抛出。
-        """
-        index_data = self._load_index()
-        index_data[vector_id] = {
-            "text": text,
-            "metadata": metadata,
-            "vector": self._embed_text(text),
-        }
-        self._save_index(index_data)
+        """新增或更新文本向量。"""
+        vector = self._embed(text)
+        self._client.insert(
+            self._collection_name,
+            {
+                "id": vector_id,
+                "vector": vector,
+                "text": text,
+                **metadata,
+            },
+        )
 
     def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
-        """检索最相似的文本分片。
-
-        参数:
-            query: 查询文本。
-            top_k: 最大返回分片数量。
-
-        返回:
-            按相似度排序的检索结果字典列表。
-
-        异常:
-            OSError: 索引文件无法读取时抛出。
-        """
+        """检索最相似的文本分片。"""
         return self.search_filtered(query=query, top_k=top_k)
 
     def search_filtered(
@@ -74,172 +74,100 @@ class LocalVectorMemory:
         min_score: float = 0.0,
         metadata_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """按相似度阈值和元数据过滤检索结果。"""
-        index_data = self._load_index()
-        langchain_results = self._search_with_langchain_faiss(
-            index_data=index_data,
-            query=query,
-            top_k=top_k,
-            min_score=min_score,
-            metadata_filter=metadata_filter,
-        )
-        if langchain_results is not None:
-            return langchain_results
-        return self._search_with_local_vectors(
-            index_data=index_data,
-            query=query,
-            top_k=top_k,
-            min_score=min_score,
-            metadata_filter=metadata_filter,
+        """按相似度阈值和元数据过滤检索。"""
+        query_vector = self._embed(query)
+        filter_expr = self._build_filter_expr(metadata_filter) if metadata_filter else ""
+        self._client.load_collection(self._collection_name)
+
+        results = self._client.search(
+            collection_name=self._collection_name,
+            data=[query_vector],
+            limit=top_k,
+            output_fields=["text", "*"],
+            filter=filter_expr,
         )
 
-    def _search_with_local_vectors(
-        self,
-        index_data: dict[str, dict[str, Any]],
-        query: str,
-        top_k: int,
-        min_score: float,
-        metadata_filter: dict[str, Any] | None,
-    ) -> list[dict[str, Any]]:
-        """使用本地 JSON 向量索引检索。"""
-        query_vector = self._embed_text(query)
-        scored_items = []
-        for vector_id, item in index_data.items():
-            metadata = dict(item.get("metadata") or {})
-            if metadata_filter and not self._metadata_matches(metadata, metadata_filter):
-                continue
-            score = self._cosine_similarity(query_vector, item["vector"])
+        parsed: list[dict[str, Any]] = []
+        for result in results[0]:
+            score = round(float(result["distance"]), 4)
             if score < min_score:
                 continue
-            scored_items.append(
+            entity = dict(result.get("entity", {}))
+            parsed.append(
                 {
-                    "vector_id": vector_id,
+                    "vector_id": result["id"],
                     "score": score,
-                    "text": item["text"],
-                    "metadata": metadata,
+                    "text": entity.pop("text", ""),
+                    "metadata": entity,
                 }
             )
-        scored_items.sort(key=lambda item: item["score"], reverse=True)
-        return scored_items[:top_k]
-
-    def _search_with_langchain_faiss(
-        self,
-        index_data: dict[str, dict[str, Any]],
-        query: str,
-        top_k: int,
-        min_score: float,
-        metadata_filter: dict[str, Any] | None,
-    ) -> list[dict[str, Any]] | None:
-        """使用 LangChain FAISS VectorStore 检索，依赖缺失时返回 None。"""
-        if not index_data:
-            return []
-        try:
-            from langchain_community.vectorstores import FAISS
-            from langchain_core.documents import Document
-        except ImportError:
-            return None
-
-        documents = [
-            Document(
-                page_content=str(item.get("text") or ""),
-                metadata={
-                    **dict(item.get("metadata") or {}),
-                    "vector_id": vector_id,
-                },
-            )
-            for vector_id, item in index_data.items()
-        ]
-        vector_store = FAISS.from_documents(
-            documents,
-            _LocalHashEmbeddings(self),
-        )
-        candidate_count = min(len(documents), max(top_k * 5, top_k))
-        candidates = vector_store.similarity_search(query, k=candidate_count)
-        query_vector = self._embed_text(query)
-        scored_items: list[dict[str, Any]] = []
-        for document in candidates:
-            metadata = dict(document.metadata)
-            vector_id = str(metadata.pop("vector_id", ""))
-            if metadata_filter and not self._metadata_matches(metadata, metadata_filter):
-                continue
-            score = self._cosine_similarity(
-                query_vector,
-                self._embed_text(document.page_content),
-            )
-            if score < min_score:
-                continue
-            scored_items.append(
-                {
-                    "vector_id": vector_id,
-                    "score": score,
-                    "text": document.page_content,
-                    "metadata": metadata,
-                }
-            )
-        scored_items.sort(key=lambda item: item["score"], reverse=True)
-        return scored_items[:top_k]
+        return parsed
 
     def delete(self, vector_ids: list[str]) -> None:
-        """按标识删除向量。
+        """按标识删除向量。"""
+        self._client.delete(self._collection_name, vector_ids)
 
-        参数:
-            vector_ids: 待删除的向量标识列表。
+    # ------------------------------------------------------------------
+    # 集合管理
+    # ------------------------------------------------------------------
 
-        返回:
-            无。
-
-        异常:
-            OSError: 索引文件无法写入时抛出。
-        """
-        index_data = self._load_index()
-        for vector_id in vector_ids:
-            index_data.pop(vector_id, None)
-        self._save_index(index_data)
-
-    def _load_index(self) -> dict[str, dict[str, Any]]:
-        """从磁盘加载向量索引。"""
-        if not self._index_path.exists():
-            return {}
-        content = self._index_path.read_text(encoding="utf-8")
-        if not content.strip():
-            return {}
-        return json.loads(content)
-
-    def _save_index(self, index_data: dict[str, dict[str, Any]]) -> None:
-        """将向量索引持久化到磁盘。"""
-        self._index_path.write_text(
-            json.dumps(index_data, ensure_ascii=False),
-            encoding="utf-8",
+    def _ensure_collection(self) -> None:
+        """确保 Milvus 集合存在，不存在则创建。"""
+        if self._client.has_collection(self._collection_name):
+            return
+        schema = MilvusClient.create_schema(
+            auto_id=False,
+            enable_dynamic_field=True,
+        )
+        schema.add_field("id", DataType.VARCHAR, max_length=64, is_primary=True)
+        schema.add_field("vector", DataType.FLOAT_VECTOR, dim=VECTOR_DIMENSION)
+        schema.add_field("text", DataType.VARCHAR, max_length=65535)
+        index_params = MilvusClient.prepare_index_params()
+        index_params.add_index(
+            field_name="vector",
+            index_type="AUTOINDEX",
+            metric_type="COSINE",
+        )
+        self._client.create_collection(
+            collection_name=self._collection_name,
+            schema=schema,
+            index_params=index_params,
         )
 
-    def _metadata_matches(
-        self,
-        metadata: dict[str, Any],
-        metadata_filter: dict[str, Any],
-    ) -> bool:
-        """判断元数据是否满足过滤条件。"""
-        for key, expected_value in metadata_filter.items():
-            actual_value = metadata.get(key)
-            if isinstance(expected_value, set | list | tuple):
-                if actual_value not in expected_value:
-                    return False
-            elif actual_value != expected_value:
-                return False
-        return True
+    # ------------------------------------------------------------------
+    # 过滤表达式
+    # ------------------------------------------------------------------
 
-    def _embed_text(self, text: str) -> list[float]:
-        """创建确定性的稀疏哈希向量。"""
-        vector = [0.0] * self.vector_dimension
+    def _build_filter_expr(self, metadata_filter: dict[str, Any]) -> str:
+        """将元数据过滤字典转为 Milvus 过滤表达式。"""
+        expr_parts: list[str] = []
+        for key, val in metadata_filter.items():
+            if isinstance(val, set | list | tuple):
+                formatted = ", ".join(repr(v) for v in val)
+                expr_parts.append(f"{key} in [{formatted}]")
+            elif isinstance(val, str):
+                expr_parts.append(f"{key} == {repr(val)}")
+            else:
+                expr_parts.append(f"{key} == {val}")
+        return " and ".join(expr_parts)
+
+    # ------------------------------------------------------------------
+    # 本地哈希向量化
+    # ------------------------------------------------------------------
+
+    def _embed(self, text: str) -> list[float]:
+        """将文本转为确定性归一化向量。"""
+        vector = [0.0] * VECTOR_DIMENSION
         normalized_text = text.lower()
         if not normalized_text:
             return vector
         for token in self._tokenize(normalized_text):
-            index = int(text_hash(token), 16) % self.vector_dimension
+            index = int(text_hash(token), 16) % VECTOR_DIMENSION
             vector[index] += 1.0
         return self._normalize_vector(vector)
 
     def _tokenize(self, text: str) -> list[str]:
-        """将中英文文本切分为哈希词元，中文使用 unigram+bigram。"""
+        """中英文文本切分，中文使用 unigram+bigram。"""
         tokens: list[str] = []
         current_word = ""
         cjk_chars: list[str] = []
@@ -268,7 +196,7 @@ class LocalVectorMemory:
         return tokens
 
     def _cjk_tokens(self, chars: list[str]) -> list[str]:
-        """为 CJK 字符生成 unigram + bigram 特征。"""
+        """CJK 字符 unigram + bigram。"""
         if not chars:
             return []
         result = list(chars)
@@ -277,34 +205,62 @@ class LocalVectorMemory:
         return result
 
     def _normalize_vector(self, vector: list[float]) -> list[float]:
-        """将向量归一化为单位长度。"""
-        norm = math.sqrt(sum(value * value for value in vector))
+        """L2 归一化。"""
+        norm = math.sqrt(sum(v * v for v in vector))
         if norm == 0:
             return vector
-        return [value / norm for value in vector]
+        return [v / norm for v in vector]
 
-    def _cosine_similarity(
-        self,
-        first_vector: list[float],
-        second_vector: list[float],
-    ) -> float:
-        """计算归一化向量的余弦相似度。"""
-        return sum(
-            first_value * second_value
-            for first_value, second_value in zip(first_vector, second_vector)
+
+class RedisKV:
+    """基于 Redis 的键值元数据存储。
+
+    用于存储用户 ID、会话 ID 等低延迟访问的元数据。
+    Redis 不可用时静默降级（各方法返回 None / False）。
+    """
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        redis_url = settings.redis_url
+        self._client: redis_py.Redis | None = (
+            redis_py.from_url(redis_url) if redis_url else None
         )
 
+    def _call(self, op_name: str, *args: Any, **kwargs: Any) -> Any:
+        """执行 Redis 操作，连接异常时静默降级。"""
+        if not self._client:
+            return None
+        try:
+            method = getattr(self._client, op_name)
+            return method(*args, **kwargs)
+        except redis_py.exceptions.ConnectionError:
+            logger.warning("[RedisKV] {} 失败：Redis 不可用", op_name)
+            return None
 
-class _LocalHashEmbeddings(Embeddings):
-    """LangChain Embeddings 兼容适配器，复用本地确定性哈希向量。"""
+    def get(self, key: str) -> Any:
+        """读取键值。"""
+        value = self._call("get", key)
+        if value is None:
+            return None
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value.decode("utf-8") if isinstance(value, bytes) else value
 
-    def __init__(self, vector_memory: LocalVectorMemory) -> None:
-        self._vector_memory = vector_memory
+    def set(self, key: str, value: Any, ttl: int | None = None) -> None:
+        """写入键值（可选 TTL 秒）。"""
+        serialized = (
+            json.dumps(value, ensure_ascii=False)
+            if not isinstance(value, (str, bytes))
+            else value
+        )
+        self._call("set", key, serialized, ex=ttl)
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """为文档列表生成向量。"""
-        return [self._vector_memory._embed_text(text) for text in texts]
+    def delete(self, key: str) -> None:
+        """删除键。"""
+        self._call("delete", key)
 
-    def embed_query(self, text: str) -> list[float]:
-        """为查询生成向量。"""
-        return self._vector_memory._embed_text(text)
+    def exists(self, key: str) -> bool:
+        """检查键是否存在。"""
+        result = self._call("exists", key)
+        return bool(result) if result is not None else False

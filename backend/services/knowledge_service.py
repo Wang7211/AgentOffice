@@ -19,9 +19,9 @@ from utils.exception import ParameterException
 
 
 class KnowledgeService:
-    """企业知识库入库服务。"""
+    """知识库入库服务。"""
 
-    allowed_suffixes = {".pdf", ".txt", ".docx"}
+    allowed_suffixes = {".pdf", ".txt", ".docx", "doc", ".markdown"}
 
     def __init__(self, db_session: Session) -> None:
         self._db_session = db_session
@@ -76,7 +76,7 @@ class KnowledgeService:
         source_path: Path,
         upload_user_id: int = 1,
     ) -> dict[str, object]:
-        """索引 Gradio 界面选择的本地文件。
+        """索引前端界面选择的本地文件。
 
         参数:
             source_path: 本地源文件路径。
@@ -135,7 +135,7 @@ class KnowledgeService:
         """校验上传文件元数据。"""
         settings = get_settings()
         if file_suffix not in self.allowed_suffixes:
-            raise ParameterException("仅允许上传PDF、TXT、DOCX文件")
+            raise ParameterException("仅允许上传PDF、TXT、DOCX、DOC、MARKDOWN文件")
         max_size = settings.max_upload_mb * 1024 * 1024
         if file_size > max_size:
             raise ParameterException("上传文件超过大小限制")
