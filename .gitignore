@@ -27,6 +27,10 @@ data/uploads/*
 data/vector_store/*
 !data/uploads/.gitkeep
 !data/vector_store/.gitkeep
+backend/data/uploads/*
+backend/data/vector_store/*
+!backend/data/uploads/.gitkeep
+!backend/data/vector_store/.gitkeep
 
 # Logs
 logs/
@@ -38,6 +42,10 @@ Thumbs.db
 
 # Docker
 .ruff_cache/
+.pytest_cache/
+.pytest_tmp/
+tmp_filetool/
+tmp_run4/
 
 # Frontend
 frontend/node_modules/

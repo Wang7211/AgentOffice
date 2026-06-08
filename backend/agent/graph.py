@@ -22,10 +22,11 @@ class AgentGraph:
         user_message: str,
         session_id: str,
         history: list[dict[str, str]],
+        user_id: int = 1,
     ) -> dict[str, Any]:
         """执行一次 Agent 任务。"""
         start_time = time.perf_counter()
-        state = self._build_initial_state(user_message, session_id, history)
+        state = self._build_initial_state(user_message, session_id, history, user_id)
         state = self._compiled_graph.invoke(state)
         log_agent_event(
             "agent_finished",
@@ -48,6 +49,7 @@ class AgentGraph:
         graph.add_node("understand", self._nodes.understand_node)
         graph.add_node("planning", self._nodes.planning_node)
         graph.add_node("tool", self._nodes.tool_node)
+        graph.add_node("observe", self._nodes.observe_node)
         graph.add_node("action", self._nodes.action_node)
         graph.add_node("mem_post", self._nodes.mem_post_node)
 
@@ -59,7 +61,12 @@ class AgentGraph:
             self._route_after_planning,
             {"tool": "tool", "action": "action"},
         )
-        graph.add_edge("tool", "action")
+        graph.add_edge("tool", "observe")
+        graph.add_conditional_edges(
+            "observe",
+            self._route_after_observe,
+            {"tool": "tool", "action": "action"},
+        )
         graph.add_edge("action", "mem_post")
         graph.add_edge("mem_post", END)
 
@@ -69,11 +76,37 @@ class AgentGraph:
         """按 need_tool 路由：需要工具走 tool，否则直接 action。"""
         return "tool" if state["need_tool"] else "action"
 
+    def _route_after_observe(self, state: AgentState) -> str:
+        """Continue tool execution while a runnable plan step remains."""
+        if state.get("step_count", 0) >= state.get("max_steps", 0):
+            return "action"
+        for step in state.get("tool_calls", []):
+            if step.get("status") != "pending":
+                continue
+            if self._dependencies_satisfied(step, state.get("tool_calls", [])):
+                return "tool"
+        return "action"
+
+    @staticmethod
+    def _dependencies_satisfied(
+        step: dict[str, Any],
+        tool_calls: list[dict[str, Any]],
+    ) -> bool:
+        completed_ids = {
+            str(s.get("step_id") or s.get("id"))
+            for s in tool_calls
+            if s.get("status") == "completed"
+        }
+        non_tool_completed = {"understand", "plan"}
+        deps = [str(dep) for dep in step.get("depends_on", [])]
+        return all(dep in completed_ids or dep in non_tool_completed for dep in deps)
+
     def _build_initial_state(
         self,
         user_message: str,
         session_id: str,
         history: list[dict[str, str]],
+        user_id: int,
     ) -> AgentState:
         """构造状态图运行的初始状态。"""
         return AgentState(
@@ -86,12 +119,15 @@ class AgentGraph:
             tool_name="",
             tool_input={},
             tool_result="",
+            plan=[],
             tool_calls=[],
             tool_results=[],
             step_count=0,
+            max_steps=6,
             error_info="",
             answer="",
             session_id=session_id,
+            user_id=user_id,
             memory_context=MemoryContext.build(
                 messages=history,
                 relevant_memories=[],

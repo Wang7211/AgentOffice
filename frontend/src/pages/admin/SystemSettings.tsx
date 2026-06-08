@@ -1,32 +1,38 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
-  Card,
-  Table,
   Button,
-  Modal,
   Form,
   Input,
-  Typography,
-  Tag,
   message,
+  Modal,
   Spin,
+  Table,
+  Tag,
 } from 'antd';
-import { EditOutlined, SettingOutlined } from '@ant-design/icons';
+import {
+  ApiOutlined,
+  DatabaseOutlined,
+  EditOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  SettingOutlined,
+  SlidersOutlined,
+} from '@ant-design/icons';
 import { listConfig, updateConfig } from '../../api/admin';
 import type { ConfigItem } from '../../api/admin';
 
-const { Title } = Typography;
-
-const typeColorMap: Record<string, string> = {
-  model: 'purple',
-  file: 'blue',
-  vector: 'green',
-  general: 'orange',
+const typeMeta: Record<string, { label: string; icon: ReactNode; tone: string }> = {
+  model: { label: '模型配置', icon: <ApiOutlined />, tone: 'violet' },
+  file: { label: '文件配置', icon: <DatabaseOutlined />, tone: 'blue' },
+  vector: { label: '向量配置', icon: <DatabaseOutlined />, tone: 'green' },
+  general: { label: '全局配置', icon: <SlidersOutlined />, tone: 'amber' },
 };
 
 export default function SystemSettings() {
   const [configs, setConfigs] = useState<ConfigItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [keyword, setKeyword] = useState('');
   const [editOpen, setEditOpen] = useState(false);
   const [editingConfig, setEditingConfig] = useState<ConfigItem | null>(null);
   const [form] = Form.useForm();
@@ -46,6 +52,25 @@ export default function SystemSettings() {
   useEffect(() => {
     loadConfigs();
   }, []);
+
+  const filteredConfigs = useMemo(() => {
+    const q = keyword.trim().toLowerCase();
+    if (!q) return configs;
+    return configs.filter((item) =>
+      [item.config_key, item.config_name, item.config_value, item.remark]
+        .join(' ')
+        .toLowerCase()
+        .includes(q),
+    );
+  }, [configs, keyword]);
+
+  const groups = useMemo(() => {
+    return Object.entries(typeMeta).map(([type, meta]) => ({
+      type,
+      ...meta,
+      count: configs.filter((item) => item.config_type === type).length,
+    }));
+  }, [configs]);
 
   const handleEdit = (config: ConfigItem) => {
     setEditingConfig(config);
@@ -67,48 +92,47 @@ export default function SystemSettings() {
   };
 
   const columns = [
-    { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
     {
       title: '配置键',
       dataIndex: 'config_key',
       key: 'config_key',
-      width: 160,
-      render: (key: string) => (
-        <code style={{ fontSize: 12, color: 'var(--gray-600)' }}>{key}</code>
-      ),
+      width: 220,
+      render: (key: string) => <code className="config-key">{key}</code>,
     },
-    { title: '名称', dataIndex: 'config_name', key: 'config_name', width: 150 },
-    { title: '值', dataIndex: 'config_value', key: 'config_value', ellipsis: true },
+    {
+      title: '名称',
+      dataIndex: 'config_name',
+      key: 'config_name',
+      width: 180,
+      render: (name: string) => <strong>{name}</strong>,
+    },
+    {
+      title: '值',
+      dataIndex: 'config_value',
+      key: 'config_value',
+      ellipsis: true,
+      render: (value: string) => <span className="config-value">{value}</span>,
+    },
     {
       title: '类型',
       dataIndex: 'config_type',
       key: 'config_type',
-      width: 90,
-      render: (t: string) => (
-        <Tag color={typeColorMap[t] || 'default'} style={{ borderRadius: 6 }}>
-          {t}
-        </Tag>
-      ),
+      width: 120,
+      render: (type: string) => <Tag className="soft-tag">{typeMeta[type]?.label || type}</Tag>,
     },
     {
       title: '备注',
       dataIndex: 'remark',
       key: 'remark',
-      width: 150,
-      render: (v: string | null) => v || <span style={{ color: 'var(--gray-400)' }}>-</span>,
+      width: 180,
+      render: (remark: string | null) => remark || <span className="table-muted">-</span>,
     },
     {
       title: '操作',
       key: 'actions',
-      width: 80,
+      width: 110,
       render: (_: any, record: ConfigItem) => (
-        <Button
-          type="link"
-          size="small"
-          icon={<EditOutlined />}
-          onClick={() => handleEdit(record)}
-          style={{ padding: 0 }}
-        >
+        <Button icon={<EditOutlined />} onClick={() => handleEdit(record)}>
           编辑
         </Button>
       ),
@@ -117,35 +141,65 @@ export default function SystemSettings() {
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 120 }}>
+      <div className="admin-loading">
         <Spin size="large" />
       </div>
     );
   }
 
   return (
-    <div className="fade-in">
-      <div className="page-header">
-        <Title level={4}>系统设置</Title>
-        <Tag icon={<SettingOutlined />} color="processing" style={{ borderRadius: 8 }}>
-          系统配置
-        </Tag>
+    <div className="admin-page fade-in">
+      <div className="admin-breadcrumb">首页 / 系统设置</div>
+      <div className="admin-page-toolbar">
+        <div>
+          <h1>系统设置</h1>
+          <p>只展示 application 级配置，避免运行中配置被误改</p>
+        </div>
+        <div className="toolbar-actions">
+          <Input
+            prefix={<SearchOutlined />}
+            placeholder="搜索配置键或名称"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+            allowClear
+            className="toolbar-search"
+          />
+          <Button icon={<ReloadOutlined />} onClick={loadConfigs}>
+            刷新
+          </Button>
+        </div>
       </div>
 
-      <Card className="admin-card" bodyStyle={{ padding: 0 }}>
+      <div className="stat-strip">
+        {groups.map((group) => (
+          <div className="summary-tile" key={group.type}>
+            <span className={`summary-icon ${group.tone}`}>{group.icon}</span>
+            <div>
+              <small>{group.label}</small>
+              <strong>{group.count}</strong>
+            </div>
+            <Tag>application</Tag>
+          </div>
+        ))}
+      </div>
+
+      <section className="ops-panel table-panel">
+        <div className="panel-title">
+          <span><SettingOutlined /> 配置列表</span>
+        </div>
         <Table
-          dataSource={configs}
+          dataSource={filteredConfigs}
           columns={columns}
           rowKey="id"
           pagination={false}
         />
-      </Card>
+      </section>
 
       <Modal
         title={
-          <span>
-            <EditOutlined style={{ marginRight: 8, color: 'var(--primary)' }} />
-            编辑配置 — {editingConfig?.config_key}
+          <span className="modal-title">
+            <EditOutlined />
+            编辑配置 / {editingConfig?.config_key}
           </span>
         }
         open={editOpen}
@@ -153,10 +207,10 @@ export default function SystemSettings() {
         onOk={handleSave}
         okText="保存"
         cancelText="取消"
-        width={520}
+        width={560}
       >
         {editingConfig && (
-          <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+          <Form form={form} layout="vertical" className="admin-form">
             <Form.Item label="配置键">
               <Input value={editingConfig.config_key} disabled />
             </Form.Item>
@@ -168,7 +222,7 @@ export default function SystemSettings() {
               name="config_value"
               rules={[{ required: true, message: '请输入配置值' }]}
             >
-              <Input.TextArea rows={3} placeholder="请输入配置值" />
+              <Input.TextArea rows={4} placeholder="请输入配置值" />
             </Form.Item>
           </Form>
         )}

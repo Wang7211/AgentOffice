@@ -41,6 +41,7 @@ class RemoteMCPTool(BaseTool):
         self.name = exposed_name
         self.description = description
         self.input_schema = input_schema
+        self.required_permissions = frozenset({"mcp:call"})
 
     def run(self, tool_input: dict[str, Any]) -> ToolResult:
         """调用远端 MCP 工具。"""

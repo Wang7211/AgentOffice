@@ -1,23 +1,29 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  Card,
+  Button,
+  Descriptions,
+  Drawer,
+  Input,
+  message,
+  Select,
+  Spin,
   Table,
   Tag,
   Typography,
-  message,
-  Select,
-  Space,
-  Modal,
-  Descriptions,
-  Spin,
-  Button,
 } from 'antd';
-import { EyeOutlined, ReloadOutlined, ApiOutlined } from '@ant-design/icons';
-import { listTraces, getTraceDetail } from '../../api/admin';
-import type { TraceItem, TraceDetail } from '../../api/admin';
+import {
+  ApiOutlined,
+  ClockCircleOutlined,
+  EyeOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  ThunderboltOutlined,
+} from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { getTraceDetail, listTraces } from '../../api/admin';
+import type { TraceDetail, TraceItem } from '../../api/admin';
 
-const { Title, Text, Paragraph } = Typography;
+const { Paragraph } = Typography;
 
 export default function TraceView() {
   const [traces, setTraces] = useState<TraceItem[]>([]);
@@ -26,15 +32,16 @@ export default function TraceView() {
   const [loading, setLoading] = useState(false);
   const [toolFilter, setToolFilter] = useState<string | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<number | undefined>(undefined);
+  const [keyword, setKeyword] = useState('');
 
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<TraceDetail | null>(null);
 
-  const loadTraces = async (p: number) => {
+  const loadTraces = async (nextPage: number) => {
     setLoading(true);
     try {
-      const result = await listTraces(p, 20, toolFilter, statusFilter);
+      const result = await listTraces(nextPage, 20, toolFilter, statusFilter);
       setTraces(result.items);
       setTotal(result.total);
       setPage(result.page);
@@ -48,6 +55,26 @@ export default function TraceView() {
   useEffect(() => {
     loadTraces(1);
   }, [toolFilter, statusFilter]);
+
+  const visibleTraces = useMemo(() => {
+    const q = keyword.trim().toLowerCase();
+    if (!q) return traces;
+    return traces.filter((trace) =>
+      [trace.id, trace.tool_name, trace.session_name, trace.tool_input]
+        .join(' ')
+        .toLowerCase()
+        .includes(q),
+    );
+  }, [keyword, traces]);
+
+  const successCount = traces.filter((trace) => trace.status === 1).length;
+  const failureCount = traces.filter((trace) => trace.status !== 1).length;
+  const avgCost = traces.length
+    ? traces.reduce((sum, trace) => sum + trace.cost_time, 0) / traces.length
+    : 0;
+  const p95Cost = traces.length
+    ? Math.max(...traces.map((trace) => trace.cost_time))
+    : 0;
 
   const handleViewDetail = async (id: number) => {
     setDetailLoading(true);
@@ -64,119 +91,134 @@ export default function TraceView() {
 
   const columns = [
     {
-      title: 'ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 60,
-    },
-    {
-      title: '工具',
+      title: 'Trace Name',
       dataIndex: 'tool_name',
       key: 'tool_name',
-      width: 120,
-      render: (name: string) => (
-        <Tag color="blue" style={{ borderRadius: 6 }}>
-          <ApiOutlined style={{ marginRight: 4 }} />
-          {name}
-        </Tag>
-      ),
+      render: (name: string) => <strong>{name}</strong>,
     },
     {
-      title: '会话',
+      title: 'Trace Id',
+      dataIndex: 'id',
+      key: 'id',
+      width: 120,
+      render: (id: number) => <span className="mono-id">{id}</span>,
+    },
+    {
+      title: '会话 / Task ID',
       dataIndex: 'session_name',
       key: 'session_name',
       ellipsis: true,
-      width: 150,
-      render: (v: string | null) => v || <span style={{ color: 'var(--gray-400)' }}>-</span>,
-    },
-    {
-      title: '输入',
-      dataIndex: 'tool_input',
-      key: 'tool_input',
-      ellipsis: true,
-      render: (input: string) => (
-        <Paragraph
-          ellipsis={{ rows: 1 }}
-          copyable={{ text: input }}
-          style={{ margin: 0, maxWidth: 200, fontSize: 12 }}
-        >
-          {input}
-        </Paragraph>
+      render: (name: string | null, record: TraceItem) => (
+        <div className="trace-session-cell">
+          <span>{name || '未命名会话'}</span>
+          <small>{record.chat_record_id}</small>
+        </div>
       ),
-    },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      key: 'status',
-      width: 80,
-      render: (s: number) =>
-        s === 1 ? (
-          <Tag color="success" style={{ borderRadius: 6 }}>成功</Tag>
-        ) : (
-          <Tag color="error" style={{ borderRadius: 6 }}>失败</Tag>
-        ),
     },
     {
       title: '耗时',
       dataIndex: 'cost_time',
       key: 'cost_time',
-      width: 80,
-      render: (t: number) => (
-        <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-          {(t * 1000).toFixed(0)}ms
-        </span>
-      ),
+      width: 110,
+      render: (cost: number) => <strong>{cost.toFixed(2)}s</strong>,
     },
     {
-      title: '时间',
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 110,
+      render: (status: number) =>
+        status === 1 ? (
+          <Tag className="status-pill success">SUCCESS</Tag>
+        ) : (
+          <Tag className="status-pill danger">FAILED</Tag>
+        ),
+    },
+    {
+      title: '执行时间',
       dataIndex: 'create_time',
       key: 'create_time',
-      width: 160,
-      render: (t: string) => (
-        <span style={{ fontSize: 12, color: 'var(--gray-500)' }}>
-          {dayjs(t).format('YYYY-MM-DD HH:mm:ss')}
-        </span>
-      ),
+      width: 170,
+      render: (time: string) => dayjs(time).format('YYYY/MM/DD HH:mm:ss'),
     },
     {
       title: '操作',
       key: 'actions',
-      width: 80,
+      width: 130,
       render: (_: any, record: TraceItem) => (
-        <Button
-          type="link"
-          icon={<EyeOutlined />}
-          onClick={() => handleViewDetail(record.id)}
-          style={{ padding: 0 }}
-        >
-          详情
+        <Button icon={<EyeOutlined />} onClick={() => handleViewDetail(record.id)}>
+          查看链路
         </Button>
       ),
     },
   ];
 
   return (
-    <div className="fade-in">
-      <div className="page-header">
-        <Title level={4}>链路追踪</Title>
-        <Space>
-          <Tag icon={<ApiOutlined />} color="processing" style={{ borderRadius: 8 }}>
-            实时监控
-          </Tag>
-        </Space>
+    <div className="admin-page trace-page fade-in">
+      <div className="admin-breadcrumb">首页 / 链路追踪</div>
+      <div className="admin-page-toolbar">
+        <div>
+          <h1>链路追踪</h1>
+          <p>检索工具运行记录，定位慢节点与失败节点</p>
+        </div>
+        <div className="toolbar-actions">
+          <Input
+            prefix={<SearchOutlined />}
+            placeholder="搜索 Trace Id / 工具 / 会话"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+            className="toolbar-search wide"
+            allowClear
+          />
+          <Button type="primary" icon={<SearchOutlined />} onClick={() => loadTraces(1)}>
+            查询
+          </Button>
+          <Button icon={<ReloadOutlined />} onClick={() => loadTraces(page)}>
+            刷新
+          </Button>
+        </div>
       </div>
 
-      <Card className="admin-card" style={{ marginBottom: 20 }}>
-        <Space wrap>
-          <span style={{ fontSize: 13, color: 'var(--gray-600)' }}>工具筛选：</span>
+      <div className="trace-stats">
+        <div className="summary-tile">
+          <span className="summary-icon green"><ThunderboltOutlined /></span>
+          <div>
+            <small>成功 / 失败 / 运行中</small>
+            <strong>{successCount} / {failureCount} / 0</strong>
+          </div>
+        </div>
+        <div className="summary-tile">
+          <span className="summary-icon cyan"><ApiOutlined /></span>
+          <div>
+            <small>成功率</small>
+            <strong>{traces.length ? Math.round((successCount / traces.length) * 100) : 0}%</strong>
+          </div>
+        </div>
+        <div className="summary-tile">
+          <span className="summary-icon violet"><ClockCircleOutlined /></span>
+          <div>
+            <small>平均耗时</small>
+            <strong>{avgCost.toFixed(2)} s</strong>
+          </div>
+        </div>
+        <div className="summary-tile">
+          <span className="summary-icon amber"><ClockCircleOutlined /></span>
+          <div>
+            <small>P95 耗时</small>
+            <strong>{p95Cost.toFixed(2)} s</strong>
+          </div>
+        </div>
+      </div>
+
+      <section className="ops-panel trace-filter-panel">
+        <div className="inline-filter">
+          <span>工具筛选</span>
           <Select
             allowClear
             placeholder="全部工具"
-            style={{ width: 140 }}
             value={toolFilter}
-            onChange={(v) => setToolFilter(v)}
+            onChange={(value) => setToolFilter(value)}
             options={[
-              { label: '全部工具', value: undefined },
               { label: 'knowledge', value: 'knowledge' },
               { label: 'search', value: 'search' },
               { label: 'browser', value: 'browser' },
@@ -185,28 +227,29 @@ export default function TraceView() {
               { label: 'file', value: 'file' },
             ]}
           />
-          <span style={{ fontSize: 13, color: 'var(--gray-600)' }}>状态：</span>
+        </div>
+        <div className="inline-filter">
+          <span>状态</span>
           <Select
             allowClear
             placeholder="全部状态"
-            style={{ width: 120 }}
             value={statusFilter}
-            onChange={(v) => setStatusFilter(v)}
+            onChange={(value) => setStatusFilter(value)}
             options={[
-              { label: '全部状态', value: undefined },
               { label: '成功', value: 1 },
               { label: '失败', value: 0 },
             ]}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => loadTraces(page)}>
-            刷新
-          </Button>
-        </Space>
-      </Card>
+        </div>
+      </section>
 
-      <Card className="admin-card" bodyStyle={{ padding: 0 }}>
+      <section className="ops-panel table-panel">
+        <div className="panel-title stacked">
+          <span>运行列表</span>
+          <small>按时间倒序查看运行记录，点击任意记录进入详情页分析慢节点与失败节点</small>
+        </div>
         <Table
-          dataSource={traces}
+          dataSource={visibleTraces}
           columns={columns}
           rowKey="id"
           loading={loading}
@@ -215,150 +258,97 @@ export default function TraceView() {
             total,
             pageSize: 20,
             onChange: loadTraces,
-            showTotal: (t) => `共 ${t} 条记录`,
-            style: { paddingRight: 16 },
+            showTotal: (count) => `第 ${page} 页，共 ${count} 条`,
           }}
-          size="small"
         />
-      </Card>
+      </section>
 
-      <Modal
+      <Drawer
         title={
-          <span>
-            <ApiOutlined style={{ marginRight: 8, color: 'var(--primary)' }} />
-            调用详情
+          <span className="drawer-title">
+            <ApiOutlined />
+            链路详情
+            {detail && (
+              <Tag className={detail.status === 1 ? 'status-pill success' : 'status-pill danger'}>
+                {detail.status === 1 ? 'SUCCESS' : 'FAILED'}
+              </Tag>
+            )}
           </span>
         }
         open={detailOpen}
-        onCancel={() => setDetailOpen(false)}
-        footer={null}
-        width={720}
-        className="fade-in"
+        onClose={() => setDetailOpen(false)}
+        width={920}
       >
         {detailLoading ? (
-          <div style={{ textAlign: 'center', padding: '40px 0' }}>
+          <div className="admin-loading compact">
             <Spin />
           </div>
         ) : detail ? (
-          <>
-            <Descriptions
-              column={2}
-              size="small"
-              style={{ marginBottom: 20 }}
-              labelStyle={{ color: 'var(--gray-500)', fontWeight: 500 }}
-            >
-              <Descriptions.Item label="工具名称">
-                <Tag color="blue" style={{ borderRadius: 6 }}>{detail.tool_name}</Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="状态">
-                {detail.status === 1 ? (
-                  <Tag color="success" style={{ borderRadius: 6 }}>成功</Tag>
-                ) : (
-                  <Tag color="error" style={{ borderRadius: 6 }}>失败</Tag>
-                )}
-              </Descriptions.Item>
-              <Descriptions.Item label="耗时">
-                <span style={{ fontFamily: 'monospace' }}>{(detail.cost_time * 1000).toFixed(0)} ms</span>
-              </Descriptions.Item>
+          <div className="trace-detail">
+            <div className="detail-meta-strip">
+              <div><ClockCircleOutlined /> <strong>{detail.cost_time.toFixed(2)}s</strong><span>总耗时</span></div>
+              <div><ApiOutlined /> <strong>{detail.tool_name}</strong><span>工具</span></div>
+              <div><ThunderboltOutlined /> <strong>{detail.id}</strong><span>Trace ID</span></div>
+            </div>
+
+            <Descriptions column={2} size="small" className="detail-descriptions">
               <Descriptions.Item label="会话">{detail.session_name || '-'}</Descriptions.Item>
               <Descriptions.Item label="执行时间">
-                {dayjs(detail.create_time).format('YYYY-MM-DD HH:mm:ss')}
+                {dayjs(detail.create_time).format('YYYY/MM/DD HH:mm:ss')}
               </Descriptions.Item>
-              <Descriptions.Item label="错误信息">
-                {detail.error_msg || <span style={{ color: 'var(--gray-400)' }}>无</span>}
+              <Descriptions.Item label="错误信息" span={2}>
+                {detail.error_msg || '无'}
               </Descriptions.Item>
             </Descriptions>
 
-            {detail.user_message && (
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--gray-700)', marginBottom: 6 }}>
-                  用户消息
+            <section className="trace-timeline">
+              <header>
+                <strong>执行时序</strong>
+                <span>窗口 {detail.cost_time.toFixed(2)}s</span>
+              </header>
+              {[
+                ['user-message', 'USER_INPUT', detail.user_message || '用户消息未记录', 8, 18],
+                ['tool-input', 'TOOL_INPUT', detail.tool_input, 24, 34],
+                ['tool-output', 'TOOL_OUTPUT', detail.tool_result || '（空）', 60, 32],
+                ['assistant-message', 'ASSISTANT', detail.assistant_message || 'AI 回复未记录', 84, 14],
+              ].map(([key, label, text, left, width]) => (
+                <div className="timeline-row" key={key}>
+                  <div className="timeline-node">
+                    <i />
+                    <span>{label}</span>
+                  </div>
+                  <div className="timeline-track">
+                    <span style={{ left: `${left}%`, width: `${width}%` }} />
+                  </div>
                 </div>
-                <div
-                  style={{
-                    background: 'var(--gray-50)',
-                    borderRadius: 10,
-                    padding: '10px 14px',
-                    fontSize: 13,
-                    color: 'var(--gray-700)',
-                  }}
-                >
-                  {detail.user_message}
-                </div>
-              </div>
-            )}
+              ))}
+            </section>
 
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--gray-700)', marginBottom: 6 }}>
-                工具输入
-              </div>
-              <pre
-                style={{
-                  background: '#1e293b',
-                  color: '#e2e8f0',
-                  borderRadius: 10,
-                  padding: '12px 16px',
-                  fontSize: 12,
-                  lineHeight: 1.6,
-                  overflow: 'auto',
-                  maxHeight: 300,
-                  margin: 0,
-                }}
-              >
-                {(() => {
-                  try {
-                    return JSON.stringify(JSON.parse(detail.tool_input), null, 2);
-                  } catch {
-                    return detail.tool_input;
-                  }
-                })()}
-              </pre>
-            </div>
-
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--gray-700)', marginBottom: 6 }}>
-                工具输出
-              </div>
-              <Paragraph
-                ellipsis={{ rows: 6, expandable: true, symbol: '展开全部' }}
-                style={{
-                  background: 'var(--gray-50)',
-                  borderRadius: 10,
-                  padding: '10px 14px',
-                  fontSize: 13,
-                  margin: 0,
-                }}
-              >
-                {detail.tool_result || <span style={{ color: 'var(--gray-400)' }}>（空）</span>}
-              </Paragraph>
-            </div>
-
-            {detail.assistant_message && (
+            <section className="trace-payloads">
               <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--gray-700)', marginBottom: 6 }}>
-                  AI 回复
-                </div>
-                <Paragraph
-                  ellipsis={{ rows: 5, expandable: true, symbol: '展开全部' }}
-                  style={{
-                    background: 'var(--gray-50)',
-                    borderRadius: 10,
-                    padding: '10px 14px',
-                    fontSize: 13,
-                    margin: 0,
-                  }}
-                >
-                  {detail.assistant_message}
+                <strong>工具输入</strong>
+                <pre>
+                  {(() => {
+                    try {
+                      return JSON.stringify(JSON.parse(detail.tool_input), null, 2);
+                    } catch {
+                      return detail.tool_input;
+                    }
+                  })()}
+                </pre>
+              </div>
+              <div>
+                <strong>工具输出</strong>
+                <Paragraph ellipsis={{ rows: 8, expandable: true, symbol: '展开全部' }}>
+                  {detail.tool_result || '（空）'}
                 </Paragraph>
               </div>
-            )}
-          </>
-        ) : (
-          <div style={{ textAlign: 'center', padding: 40, color: 'var(--gray-400)' }}>
-            加载失败
+            </section>
           </div>
+        ) : (
+          <div className="admin-empty-state">加载失败</div>
         )}
-      </Modal>
+      </Drawer>
     </div>
   );
 }

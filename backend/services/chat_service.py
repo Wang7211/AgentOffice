@@ -15,6 +15,7 @@ from database.tables import ToolRecord
 from memory.store import chat_memory
 from memory.store import redis_kv
 from utils.common import generate_uuid
+from utils.common import local_isoformat
 from utils.exception import ParameterException
 from utils.structured_log import log_agent_event
 from utils.structured_log import preview_text
@@ -28,6 +29,7 @@ class _CachedSession:
 
     def __init__(self, data: dict) -> None:
         self.session_id = data["session_id"]
+        self.user_id = data.get("user_id")
         self.model_name = data.get("model_name", "")
 
 
@@ -98,6 +100,7 @@ class ChatService:
                 ),
                 model_name=session.model_name,
             )
+            recent_history = self._load_agent_history(session.session_id, user_id)
             user_record = self._create_record(session.session_id, "user", message)
             log_agent_event(
                 "chat_record_buffered",
@@ -106,20 +109,12 @@ class ChatService:
                 role="user",
                 content_preview=preview_text(message),
             )
-            recent_history = chat_memory.get_recent(session.session_id)
-
-            # ── 注入 Redis 缓存的上下文摘要 ────────────────────────
-            summary = redis_kv.get(f"summary:{session.session_id}")
-            if summary:
-                recent_history = [
-                    {"role": "system", "content": f"【历史对话摘要】{summary}"},
-                ] + recent_history
-
             chat_memory.append(session.session_id, "user", message)
             agent_result = self._agent_graph.run(
                 user_message=message,
                 session_id=session.session_id,
                 history=recent_history,
+                user_id=user_id,
             )
             assistant_record = self._create_record(
                 session.session_id,
@@ -169,10 +164,72 @@ class ChatService:
             )
             raise
 
+    def _load_agent_history(
+        self,
+        session_id: str,
+        user_id: int,
+    ) -> list[dict[str, str]]:
+        """Load the recent conversation context used by AgentGraph.
+
+        ChatMemory is a process-local cache. When it is empty, rebuild the
+        recent window from MySQL so existing sessions survive process restarts.
+        """
+        recent_history = chat_memory.get_recent(session_id)
+        history_source = "memory"
+        if not recent_history:
+            recent_history = self._restore_recent_history(session_id, user_id)
+            history_source = "database" if recent_history else "empty"
+
+        summary = redis_kv.get(f"summary:{session_id}")
+        if summary:
+            recent_history = [
+                {"role": "system", "content": f"【历史对话摘要】{summary}"},
+            ] + recent_history
+
+        log_agent_event(
+            "chat_history_loaded",
+            session_id=session_id,
+            user_id=user_id,
+            source=history_source,
+            message_count=len(recent_history),
+            has_summary=bool(summary),
+        )
+        return recent_history
+
+    def _restore_recent_history(
+        self,
+        session_id: str,
+        user_id: int,
+    ) -> list[dict[str, str]]:
+        """Restore the short-term chat window from persisted chat records."""
+        settings = get_settings()
+        max_messages = max(settings.chat_window_size * 2, 1)
+        records = (
+            self._db_session.query(ChatRecord)
+            .join(ChatSession, ChatSession.session_id == ChatRecord.session_id)
+            .filter(
+                ChatRecord.session_id == session_id,
+                ChatRecord.is_delete == 0,
+                ChatRecord.role.in_(("user", "assistant")),
+                ChatSession.user_id == user_id,
+                ChatSession.is_delete == 0,
+            )
+            .order_by(desc(ChatRecord.create_time), desc(ChatRecord.id))
+            .limit(max_messages)
+            .all()
+        )
+        history = [
+            {"role": record.role, "content": record.content}
+            for record in reversed(records)
+        ]
+        for item in history:
+            chat_memory.append(session_id, item["role"], item["content"])
+        return history
+
     @staticmethod
     def _extract_citations(agent_result: dict[str, object]) -> list[dict[str, str]]:
         """从 agent 结果中提取知识库引用文档列表。"""
-        tool_calls = agent_result.get("tool_calls") or []
+        tool_calls = agent_result.get("tool_results") or agent_result.get("tool_calls") or []
         if not isinstance(tool_calls, list) or not tool_calls:
             return []
         seen: set[str] = set()
@@ -235,7 +292,11 @@ class ChatService:
         })
         yield f"event: done\ndata: {done_data}\n\n"
 
-    def history(self, session_id: str | None = None) -> list[dict[str, object]]:
+    def history(
+        self,
+        session_id: str | None = None,
+        user_id: int = 1,
+    ) -> list[dict[str, object]]:
         """返回聊天历史。
 
         参数:
@@ -248,12 +309,20 @@ class ChatService:
             无。
         """
         if session_id:
+            session = self._db_session.query(ChatSession).filter_by(
+                session_id=session_id,
+                user_id=user_id,
+                is_delete=0,
+            ).first()
+            if session is None:
+                raise ParameterException("会话不存在")
             records = self._db_session.query(ChatRecord).filter_by(
                 session_id=session_id,
                 is_delete=0,
             ).order_by(ChatRecord.create_time.asc()).all()
             return [self._record_to_dict(record) for record in records]
         sessions = self._db_session.query(ChatSession).filter_by(
+            user_id=user_id,
             is_delete=0,
         ).order_by(desc(ChatSession.update_time)).limit(50).all()
         return [self._session_to_dict(session) for session in sessions]
@@ -269,13 +338,22 @@ class ChatService:
         if session_id:
             # 1) Redis 缓存查询
             cached = redis_kv.get(f"session:{session_id}")
-            if cached and not cached.get("is_delete"):
+            if (
+                cached
+                and not cached.get("is_delete")
+                and str(cached.get("user_id") or "") == str(user_id)
+            ):
                 return _CachedSession(cached)  # type: ignore[return-value]
             # 2) MySQL 兜底
-            session = self._db_session.get(ChatSession, session_id)
-            if session and session.is_delete == 0:
+            session = self._db_session.query(ChatSession).filter_by(
+                session_id=session_id,
+                user_id=user_id,
+                is_delete=0,
+            ).first()
+            if session:
                 _cache_session(session)
                 return session
+            raise ParameterException("会话不存在")
         new_session = ChatSession(
             session_id=generate_uuid(),
             user_id=user_id,
@@ -311,7 +389,7 @@ class ChatService:
         start_time: float,
     ) -> None:
         """在工具被调用时创建工具调用日志。"""
-        tool_calls = agent_result.get("tool_calls")
+        tool_calls = agent_result.get("tool_results") or agent_result.get("tool_calls")
         if isinstance(tool_calls, list) and tool_calls:
             for tool_call in tool_calls:
                 if not isinstance(tool_call, dict):
@@ -324,7 +402,7 @@ class ChatService:
                         tool_call.get("tool_result") or tool_call.get("content") or "",
                     ),
                     cost_time=float(tool_call.get("duration_ms") or 0) / 1000,
-                    status=1 if tool_call.get("status") == "success" else 0,
+                    status=1 if tool_call.get("status") in ("success", "completed") else 0,
                     error_msg=str(tool_call.get("error_msg") or ""),
                 )
             return
@@ -376,7 +454,7 @@ class ChatService:
             "session_id": record.session_id,
             "role": record.role,
             "content": record.content,
-            "create_time": record.create_time.isoformat(),
+            "create_time": local_isoformat(record.create_time),
         }
 
     def _session_to_dict(self, session: ChatSession) -> dict[str, object]:
@@ -385,8 +463,8 @@ class ChatService:
             "session_id": session.session_id,
             "session_name": session.session_name,
             "model_name": session.model_name,
-            "create_time": session.create_time.isoformat(),
-            "update_time": session.update_time.isoformat(),
+            "create_time": local_isoformat(session.create_time),
+            "update_time": local_isoformat(session.update_time),
         }
 
     def list_sessions(
@@ -416,6 +494,7 @@ class ChatService:
         self,
         session_id: str,
         session_name: str,
+        user_id: int = 1,
     ) -> dict[str, object]:
         """重命名会话。
 
@@ -428,6 +507,7 @@ class ChatService:
         """
         session = self._db_session.query(ChatSession).filter_by(
             session_id=session_id,
+            user_id=user_id,
             is_delete=0,
         ).first()
         if session is None:
@@ -437,7 +517,7 @@ class ChatService:
         redis_kv.delete(f"session:{session_id}")
         return self._session_to_dict(session)
 
-    def delete_session(self, session_id: str) -> dict[str, object]:
+    def delete_session(self, session_id: str, user_id: int = 1) -> dict[str, object]:
         """软删除会话。
 
         参数:
@@ -448,6 +528,7 @@ class ChatService:
         """
         session = self._db_session.query(ChatSession).filter_by(
             session_id=session_id,
+            user_id=user_id,
             is_delete=0,
         ).first()
         if session is None:

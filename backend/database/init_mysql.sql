@@ -5,6 +5,10 @@ CREATE DATABASE IF NOT EXISTS `agentoffice`
     DEFAULT CHARACTER SET utf8mb4
     COLLATE utf8mb4_unicode_ci;
 
+CREATE DATABASE IF NOT EXISTS `agentoffice_test`
+    DEFAULT CHARACTER SET utf8mb4
+    COLLATE utf8mb4_unicode_ci;
+
 CREATE USER IF NOT EXISTS 'agentoffice'@'localhost'
     IDENTIFIED BY 'agentoffice123';
 
@@ -13,5 +17,7 @@ CREATE USER IF NOT EXISTS 'agentoffice'@'%'
 
 GRANT ALL PRIVILEGES ON `agentoffice`.* TO 'agentoffice'@'localhost';
 GRANT ALL PRIVILEGES ON `agentoffice`.* TO 'agentoffice'@'%';
+GRANT ALL PRIVILEGES ON `agentoffice_test`.* TO 'agentoffice'@'localhost';
+GRANT ALL PRIVILEGES ON `agentoffice_test`.* TO 'agentoffice'@'%';
 
 FLUSH PRIVILEGES;

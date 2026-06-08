@@ -32,11 +32,8 @@ export interface ChatResult {
   citations?: Citation[];
 }
 
-export async function listSessions(
-  userId: number,
-  keyword?: string,
-): Promise<ChatSession[]> {
-  const params: any = { user_id: userId };
+export async function listSessions(keyword?: string): Promise<ChatSession[]> {
+  const params: Record<string, string> = {};
   if (keyword) params.keyword = keyword;
   const res = await client.get('/chat/sessions', { params });
   return res.data.data;
@@ -45,7 +42,7 @@ export async function listSessions(
 export async function getChatHistory(
   sessionId?: string,
 ): Promise<ChatRecord[]> {
-  const params: any = {};
+  const params: Record<string, string> = {};
   if (sessionId) params.session_id = sessionId;
   const res = await client.get('/chat/history', { params });
   return res.data.data;
@@ -65,11 +62,9 @@ export async function deleteSession(sessionId: string): Promise<void> {
   await client.delete(`/chat/sessions/${sessionId}`);
 }
 
-// SSE streaming chat
 export function streamChat(
   message: string,
   sessionId: string | null,
-  userId: number,
   onMessage: (content: string) => void,
   onMeta: (data: any) => void,
   onDone: (data?: any) => void,
@@ -87,7 +82,6 @@ export function streamChat(
       message,
       session_id: sessionId,
       stream: true,
-      user_id: userId,
     }),
     signal: controller.signal,
   })
@@ -127,7 +121,7 @@ export function streamChat(
                 onDone(data);
               }
             } catch {
-              // ignore parse errors for partial chunks
+              // Partial SSE chunks can arrive before a complete JSON payload.
             }
           }
         }

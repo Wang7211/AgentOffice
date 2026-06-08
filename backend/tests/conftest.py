@@ -1,5 +1,6 @@
 """共享的测试 fixtures 和配置。"""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -9,16 +10,24 @@ from pytest import MonkeyPatch
 # 环境变量：测试期间使用本地规则模型，不依赖外部 API
 # ---------------------------------------------------------------------------
 
+DEFAULT_TEST_DATABASE_URL = (
+    "mysql+pymysql://agentoffice:agentoffice123@127.0.0.1:3307/"
+    "agentoffice_test?charset=utf8mb4"
+)
+
 _TEST_ENV_VARS = {
     "APP_ENV": "test",
     "MODEL_PROVIDER": "local",
-    "DATABASE_URL": "sqlite:///file:test.db?mode=memory&cache=shared&uri=true",
+    "DATABASE_URL": os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL),
     "REDIS_URL": "",
     "OPENAI_API_KEY": "",
     "DEEPSEEK_API_KEY": "",
     "QWEN_API_KEY": "",
     "JWT_SECRET_KEY": "test-secret-key-for-testing-purposes-only!",
 }
+
+for key, value in _TEST_ENV_VARS.items():
+    os.environ[key] = value
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +40,14 @@ def _setup_test_env(monkeypatch: MonkeyPatch) -> None:
 
     _gs.cache_clear()
     _gs()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _init_test_database() -> None:
+    """Initialize the MySQL test database once for the test session."""
+    from database.db import init_database
+
+    init_database()
 
 
 @pytest.fixture

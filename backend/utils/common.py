@@ -6,9 +6,11 @@ import uuid
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 SENSITIVE_KEYS = ("password", "token", "secret", "key", "mobile", "phone")
+LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def now_datetime() -> datetime:
@@ -21,6 +23,13 @@ def now_datetime() -> datetime:
         无。
     """
     return datetime.now(timezone.utc)
+
+
+def local_isoformat(value: datetime) -> str:
+    """Serialize UTC DB datetimes as local dashboard/client time."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(LOCAL_TIMEZONE).replace(tzinfo=None).isoformat()
 
 
 def generate_uuid() -> str:

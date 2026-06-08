@@ -19,6 +19,7 @@ class FileTool(BaseTool):
     description = "解析PDF、TXT、DOCX文件文本内容。"
     input_schema = {"file_path": "必填，本地文件路径。"}
     allowed_suffixes = {".pdf", ".txt", ".docx"}
+    required_permissions = frozenset({"file:read"})
 
     def run(self, tool_input: dict[str, Any]) -> ToolResult:
         """从本地文件中抽取规范化文本。

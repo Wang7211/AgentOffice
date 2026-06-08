@@ -4,6 +4,7 @@ import json
 from abc import ABC
 from abc import abstractmethod
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 from typing import Callable
 
@@ -17,6 +18,8 @@ class ToolSpec:
     name: str
     description: str
     input_schema: dict[str, str]
+    required_permissions: tuple[str, ...] = ()
+    context_schema: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -27,12 +30,27 @@ class ToolResult:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    """Runtime context supplied by the agent executor for tool calls."""
+
+    user_id: int
+    session_id: str
+    permissions: frozenset[str] = field(default_factory=frozenset)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def has_permissions(self, required_permissions: set[str] | frozenset[str]) -> bool:
+        return set(required_permissions).issubset(self.permissions)
+
+
 class BaseTool(ABC):
     """Agent 工具抽象基类。"""
 
     name: str
     description: str
     input_schema: dict[str, str]
+    required_permissions: frozenset[str] = frozenset()
+    context_schema: dict[str, str] = {}
 
     @abstractmethod
     def run(self, tool_input: dict[str, Any]) -> ToolResult:
@@ -48,6 +66,43 @@ class BaseTool(ABC):
             ToolException: 工具执行失败时抛出。
         """
 
+    def run_with_context(
+        self,
+        tool_input: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> ToolResult:
+        """Run a tool after permission checks and context injection."""
+        self._validate_permissions(context)
+        scoped_input = self._inject_context(dict(tool_input), context)
+        return self.run(scoped_input)
+
+    def _validate_permissions(self, context: ToolExecutionContext | None) -> None:
+        if not self.required_permissions:
+            return
+        if context is None:
+            raise ToolException(f"Tool {self.name} requires execution context")
+        missing = sorted(self.required_permissions - context.permissions)
+        if missing:
+            raise ToolException(
+                f"Tool {self.name} missing permissions: {', '.join(missing)}"
+            )
+
+    def _inject_context(
+        self,
+        tool_input: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> dict[str, Any]:
+        if context is None:
+            return tool_input
+        for context_field, input_key in self.context_schema.items():
+            if context_field == "user_id":
+                tool_input[input_key] = context.user_id
+            elif context_field == "session_id":
+                tool_input[input_key] = context.session_id
+            elif context_field in context.metadata:
+                tool_input[input_key] = context.metadata[context_field]
+        return tool_input
+
     def spec(self) -> ToolSpec:
         """返回工具公开元数据。
 
@@ -61,6 +116,8 @@ class BaseTool(ABC):
             name=self.name,
             description=self.description,
             input_schema=self.input_schema,
+            required_permissions=tuple(sorted(self.required_permissions)),
+            context_schema=dict(self.context_schema),
         )
 
 

@@ -1,24 +1,26 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  Card,
-  Table,
   Button,
-  Modal,
   Form,
   Input,
-  Select,
-  Tag,
-  Typography,
   message,
-  Space,
+  Modal,
   Popconfirm,
+  Select,
+  Table,
+  Tag,
 } from 'antd';
-import { EditOutlined, DeleteOutlined, UserOutlined } from '@ant-design/icons';
-import { listUsers, updateUser, deleteUser } from '../../api/admin';
-import type { UserItem } from '../../api/admin';
+import {
+  DeleteOutlined,
+  EditOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  TeamOutlined,
+  UserOutlined,
+} from '@ant-design/icons';
 import dayjs from 'dayjs';
-
-const { Title } = Typography;
+import { deleteUser, listUsers, updateUser } from '../../api/admin';
+import type { UserItem } from '../../api/admin';
 
 export default function UserManagement() {
   const [users, setUsers] = useState<UserItem[]>([]);
@@ -31,10 +33,10 @@ export default function UserManagement() {
   const [editingUser, setEditingUser] = useState<UserItem | null>(null);
   const [form] = Form.useForm();
 
-  const loadUsers = async (p: number) => {
+  const loadUsers = async (nextPage: number) => {
     setLoading(true);
     try {
-      const result = await listUsers(p, 20, keyword || undefined);
+      const result = await listUsers(nextPage, 20, keyword || undefined);
       setUsers(result.items);
       setTotal(result.total);
       setPage(result.page);
@@ -48,6 +50,18 @@ export default function UserManagement() {
   useEffect(() => {
     loadUsers(1);
   }, [keyword]);
+
+  const userStats = useMemo(() => {
+    const adminCount = users.filter((user) => user.role === 'admin').length;
+    const activeCount = users.filter((user) => user.status === 1).length;
+    const disabledCount = users.length - activeCount;
+    return [
+      { label: '用户总数', value: total || users.length, icon: <TeamOutlined />, tone: 'blue' },
+      { label: '管理员', value: adminCount, icon: <UserOutlined />, tone: 'violet' },
+      { label: '正常账号', value: activeCount, icon: <UserOutlined />, tone: 'green' },
+      { label: '禁用账号', value: disabledCount, icon: <UserOutlined />, tone: 'amber' },
+    ];
+  }, [total, users]);
 
   const handleEdit = (user: UserItem) => {
     setEditingUser(user);
@@ -89,91 +103,113 @@ export default function UserManagement() {
   };
 
   const columns = [
-    { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
     {
-      title: '用户名',
+      title: '用户',
       dataIndex: 'username',
       key: 'username',
-      width: 130,
-      render: (name: string) => (
-        <span>
-          <UserOutlined style={{ marginRight: 6, color: 'var(--gray-400)' }} />
-          {name}
+      render: (name: string, record: UserItem) => (
+        <span className="user-table-cell">
+          <span className="user-avatar small">{(record.nickname || name || 'U')[0].toUpperCase()}</span>
+          <span>
+            <strong>{name}</strong>
+            <small>{record.nickname || '未设置昵称'}</small>
+          </span>
         </span>
       ),
     },
-    { title: '昵称', dataIndex: 'nickname', key: 'nickname', width: 130, render: (v: string | null) => v || '-' },
     {
       title: '角色',
       dataIndex: 'role',
       key: 'role',
-      width: 100,
+      width: 120,
       render: (role: string) =>
         role === 'admin' ? (
-          <Tag color="red" style={{ borderRadius: 6 }}>管理员</Tag>
+          <Tag className="status-pill danger">管理员</Tag>
         ) : (
-          <Tag color="blue" style={{ borderRadius: 6 }}>用户</Tag>
+          <Tag className="status-pill info">用户</Tag>
         ),
     },
     {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 80,
-      render: (s: number) =>
-        s === 1
-          ? <Tag color="success" style={{ borderRadius: 6 }}>正常</Tag>
-          : <Tag color="error" style={{ borderRadius: 6 }}>禁用</Tag>,
+      width: 120,
+      render: (status: number) =>
+        status === 1 ? (
+          <Tag className="status-pill success">正常</Tag>
+        ) : (
+          <Tag className="status-pill danger">禁用</Tag>
+        ),
     },
     {
       title: '注册时间',
       dataIndex: 'create_time',
       key: 'create_time',
-      width: 170,
-      render: (t: string) => (
-        <span style={{ fontSize: 12, color: 'var(--gray-500)' }}>
-          {dayjs(t).format('YYYY-MM-DD HH:mm')}
-        </span>
+      width: 180,
+      render: (time: string) => (
+        <span className="table-muted">{dayjs(time).format('YYYY/MM/DD HH:mm')}</span>
       ),
     },
     {
       title: '操作',
       key: 'actions',
-      width: 130,
+      width: 160,
       render: (_: any, record: UserItem) => (
-        <Space>
-          <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)} style={{ padding: 0 }}>
+        <div className="table-actions">
+          <Button icon={<EditOutlined />} onClick={() => handleEdit(record)}>
             编辑
           </Button>
           <Popconfirm
-            title="确定删除此用户？"
-            description="删除后无法恢复"
+            title="删除此用户？"
+            description="删除后无法恢复。"
             onConfirm={() => handleDelete(record.id)}
             okText="删除"
             cancelText="取消"
           >
-            <Button type="link" size="small" danger icon={<DeleteOutlined />} style={{ padding: 0 }}>
-              删除
-            </Button>
+            <Button danger icon={<DeleteOutlined />} />
           </Popconfirm>
-        </Space>
+        </div>
       ),
     },
   ];
 
   return (
-    <div className="fade-in">
-      <div className="page-header">
-        <Title level={4}>用户管理</Title>
-        <Input.Search
-          placeholder="搜索用户名..."
-          style={{ width: 240 }}
-          onSearch={(v) => setKeyword(v)}
-          allowClear
-        />
+    <div className="admin-page fade-in">
+      <div className="admin-breadcrumb">首页 / 用户管理</div>
+      <div className="admin-page-toolbar">
+        <div>
+          <h1>用户管理</h1>
+          <p>管理账号状态、角色权限与登录身份</p>
+        </div>
+        <div className="toolbar-actions">
+          <Input
+            prefix={<SearchOutlined />}
+            placeholder="搜索用户名"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+            allowClear
+            className="toolbar-search"
+          />
+          <Button icon={<ReloadOutlined />} onClick={() => loadUsers(page)}>
+            刷新
+          </Button>
+        </div>
       </div>
 
-      <Card className="admin-card" bodyStyle={{ padding: 0 }}>
+      <div className="stat-strip">
+        {userStats.map((item) => (
+          <div className="summary-tile" key={item.label}>
+            <span className={`summary-icon ${item.tone}`}>{item.icon}</span>
+            <div>
+              <small>{item.label}</small>
+              <strong>{item.value}</strong>
+            </div>
+            <Tag>当前页</Tag>
+          </div>
+        ))}
+      </div>
+
+      <section className="ops-panel table-panel">
         <Table
           dataSource={users}
           columns={columns}
@@ -184,17 +220,16 @@ export default function UserManagement() {
             total,
             pageSize: 20,
             onChange: loadUsers,
-            showTotal: (t) => `共 ${t} 个用户`,
-            style: { paddingRight: 16 },
+            showTotal: (count) => `共 ${count} 个用户`,
           }}
         />
-      </Card>
+      </section>
 
       <Modal
         title={
-          <span>
-            <EditOutlined style={{ marginRight: 8, color: 'var(--primary)' }} />
-            编辑用户 — {editingUser?.username}
+          <span className="modal-title">
+            <EditOutlined />
+            编辑用户 / {editingUser?.username}
           </span>
         }
         open={editOpen}
@@ -202,9 +237,9 @@ export default function UserManagement() {
         onOk={handleSave}
         okText="保存"
         cancelText="取消"
-        width={480}
+        width={520}
       >
-        <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+        <Form form={form} layout="vertical" className="admin-form">
           <Form.Item label="昵称" name="nickname">
             <Input placeholder="输入用户昵称" />
           </Form.Item>

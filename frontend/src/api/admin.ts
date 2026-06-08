@@ -6,7 +6,18 @@ export interface DashboardStats {
   file_count: number;
   chunk_count: number;
   tool_call_count: number;
+  tool_success_count?: number;
+  tool_failure_count?: number;
+  avg_tool_cost?: number;
+  p95_tool_cost?: number;
   today_chat_count: number;
+  hourly_activity?: {
+    label: string;
+    chat_count: number;
+    tool_count: number;
+    success_count: number;
+    failure_count: number;
+  }[];
   recent_sessions: { session_id: string; session_name: string; create_time: string }[];
   recent_tools: { id: number; tool_name: string; status: number; cost_time: number; create_time: string }[];
 }

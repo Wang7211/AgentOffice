@@ -18,6 +18,9 @@ class KnowledgeTool(BaseTool):
     description = "检索企业本地知识库，返回相似文档分片。"
     input_schema = {"query": "必填，知识库检索问题。"}
 
+    required_permissions = frozenset({"knowledge:read"})
+    context_schema = {"user_id": "upload_user_id"}
+
     def run(self, tool_input: dict[str, Any]) -> ToolResult:
         """检索知识库分片。
 
@@ -36,6 +39,12 @@ class KnowledgeTool(BaseTool):
             raise ToolException("知识库检索问题不能为空")
         settings = get_settings()
         query_category = classify_document("", query)
+        upload_user_id = tool_input.get("upload_user_id") or tool_input.get("user_id")
+        metadata_filter = (
+            {"upload_user_id": int(upload_user_id)}
+            if upload_user_id is not None
+            else None
+        )
         raw_results = vector_memory.search_filtered(
             query=query,
             top_k=top_k * 3,
@@ -45,6 +54,7 @@ class KnowledgeTool(BaseTool):
                     settings.knowledge_similarity_threshold,
                 )
             ),
+            metadata_filter=metadata_filter,
         )
         results, rejected_results = self._filter_by_category(
             raw_results,

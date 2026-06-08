@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import Header
+from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -13,6 +14,7 @@ from utils.auth import create_access_token
 from utils.auth import hash_password
 from utils.auth import verify_password
 from utils.auth import verify_token
+from utils.common import local_isoformat
 from utils.exception import ParameterException
 from utils.exception import success_response
 
@@ -45,9 +47,12 @@ class TokenData(BaseModel):
 
 def _get_token_from_header(authorization: str = Header(...)) -> str:
     """从 Authorization 头中提取 Bearer 令牌。"""
-    if not authorization.startswith("Bearer "):
-        raise ParameterException("认证头格式错误")
-    return authorization[7:]
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return token
 
 
 def get_current_user(
@@ -56,20 +61,31 @@ def get_current_user(
 ) -> SysUser:
     """从请求中解析当前用户（依赖注入）。"""
     auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise ParameterException("未提供认证令牌")
-    token = auth_header[7:]
+    if not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
     payload = verify_token(token)
     if payload is None:
-        raise ParameterException("令牌无效或已过期")
+        raise HTTPException(status_code=401, detail="Invalid token")
     user = db_session.query(SysUser).filter_by(
         id=payload.get("user_id"),
         is_delete=0,
         status=1,
     ).first()
     if user is None:
-        raise ParameterException("用户不存在或已被禁用")
+        raise HTTPException(status_code=401, detail="User not found or disabled")
     return user
+
+
+def require_admin_user(
+    current_user: SysUser = Depends(get_current_user),
+) -> SysUser:
+    """Require an authenticated administrator."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return current_user
 
 
 @auth_router.post("/login")
@@ -155,7 +171,7 @@ async def get_me(
         "role": current_user.role,
         "avatar": current_user.avatar or DEFAULT_AVATAR,
         "status": current_user.status,
-        "create_time": current_user.create_time.isoformat(),
+        "create_time": local_isoformat(current_user.create_time),
     })
 
 

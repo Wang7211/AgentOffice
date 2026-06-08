@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +15,9 @@ from config.settings import get_settings
 from database.db import init_database
 from utils.exception import register_exception_handlers
 from utils.logger import configure_logger
+
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 @asynccontextmanager
@@ -56,7 +60,7 @@ def create_app() -> FastAPI:
     application.include_router(api_router, prefix="/api")
     application.include_router(auth_router, prefix="/api")
     application.include_router(admin_router, prefix="/api")
-    application.mount("/static", StaticFiles(directory="static"), name="static")
+    application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @application.get("/favicon.ico", include_in_schema=False)
     async def favicon_redirect():

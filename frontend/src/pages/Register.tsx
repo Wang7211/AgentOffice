@@ -1,6 +1,13 @@
 import { useState } from 'react';
 import { Card, Form, Input, Button, message, Typography } from 'antd';
-import { UserOutlined, LockOutlined, SmileOutlined, RobotOutlined } from '@ant-design/icons';
+import {
+  UserOutlined,
+  LockOutlined,
+  SmileOutlined,
+  SafetyCertificateOutlined,
+  DatabaseOutlined,
+  ApiOutlined,
+} from '@ant-design/icons';
 import { useNavigate, Link } from 'react-router-dom';
 import { register } from '../api/auth';
 import { useAuthStore } from '../stores/authStore';
@@ -27,7 +34,7 @@ export default function Register() {
         role: result.role,
         avatar: result.avatar,
       });
-      message.success({ content: '注册成功，欢迎加入！', duration: 2 });
+      message.success({ content: '注册成功', duration: 2 });
       navigate('/chat');
     } catch (err: any) {
       message.error(err.response?.data?.message || err.message || '注册失败');
@@ -37,14 +44,32 @@ export default function Register() {
   };
 
   return (
-    <div className="auth-container">
+    <div className="auth-shell">
+      <section className="auth-brief">
+        <div className="auth-brand">
+          <span className="brand-icon large">
+            <img src="/static/logo.jpg" className="logo-img" alt="AgentOffice" />
+          </span>
+          <span>
+            <strong>AgentOffice</strong>
+            <small>企业 AI 办公工作台</small>
+          </span>
+        </div>
+        <div className="auth-brief-copy">
+          <h1>创建账号</h1>
+          <p>账号创建后可进入独立会话空间，管理员可在后台管理用户与系统配置。</p>
+        </div>
+        <div className="auth-capabilities">
+          <span><DatabaseOutlined /> 知识库隔离</span>
+          <span><ApiOutlined /> 调用链路</span>
+          <span><SafetyCertificateOutlined /> 权限控制</span>
+        </div>
+      </section>
+
       <Card className="auth-card">
         <div className="auth-header">
-          <div className="auth-logo">
-            <img src="/static/logo.jpg" className="logo-img" alt="AgentOffice" />
-          </div>
-          <h1>创建账号</h1>
-          <p>注册 AgentOffice 企业智能助手</p>
+          <h2>注册</h2>
+          <p>填写账号信息后进入 AgentOffice。</p>
         </div>
         <Form
           name="register"
@@ -56,39 +81,39 @@ export default function Register() {
         >
           <Form.Item
             name="username"
+            label="用户名"
             rules={[
               { required: true, message: '请输入用户名' },
               { min: 3, message: '用户名至少 3 个字符' },
             ]}
           >
             <Input
-              prefix={<UserOutlined style={{ color: 'var(--gray-400)' }} />}
-              placeholder="用户名"
-              style={{ height: 44 }}
+              prefix={<UserOutlined />}
+              placeholder="请输入用户名"
             />
           </Form.Item>
-          <Form.Item name="nickname">
+          <Form.Item name="nickname" label="昵称">
             <Input
-              prefix={<SmileOutlined style={{ color: 'var(--gray-400)' }} />}
-              placeholder="昵称（选填）"
-              style={{ height: 44 }}
+              prefix={<SmileOutlined />}
+              placeholder="可选"
             />
           </Form.Item>
           <Form.Item
             name="password"
+            label="密码"
             rules={[
               { required: true, message: '请输入密码' },
               { min: 6, message: '密码至少 6 个字符' },
             ]}
           >
             <Input.Password
-              prefix={<LockOutlined style={{ color: 'var(--gray-400)' }} />}
-              placeholder="密码"
-              style={{ height: 44 }}
+              prefix={<LockOutlined />}
+              placeholder="请输入密码"
             />
           </Form.Item>
           <Form.Item
             name="confirmPassword"
+            label="确认密码"
             dependencies={['password']}
             rules={[
               { required: true, message: '请确认密码' },
@@ -103,29 +128,24 @@ export default function Register() {
             ]}
           >
             <Input.Password
-              prefix={<LockOutlined style={{ color: 'var(--gray-400)' }} />}
-              placeholder="确认密码"
-              style={{ height: 44 }}
+              prefix={<LockOutlined />}
+              placeholder="再次输入密码"
             />
           </Form.Item>
-          <Form.Item style={{ marginTop: 28, marginBottom: 20 }}>
+          <Form.Item className="auth-submit">
             <Button
               type="primary"
               htmlType="submit"
               block
               loading={loading}
               size="large"
-              style={{ height: 46, fontSize: 15, fontWeight: 600 }}
             >
-              注 册
+              注册
             </Button>
           </Form.Item>
-          <div style={{ textAlign: 'center' }}>
-            <Text type="secondary" style={{ fontSize: 13 }}>
-              已有账号？{' '}
-              <Link to="/login" style={{ fontWeight: 600 }}>
-                返回登录
-              </Link>
+          <div className="auth-switch">
+            <Text type="secondary">
+              已有账号？ <Link to="/login">返回登录</Link>
             </Text>
           </div>
         </Form>

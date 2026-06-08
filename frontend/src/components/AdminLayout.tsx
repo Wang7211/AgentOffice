@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Layout, Menu, Typography, Button } from 'antd';
+import { Layout, Menu, Typography, Button, Tag } from 'antd';
 import {
   DashboardOutlined,
   DatabaseOutlined,
@@ -8,7 +8,6 @@ import {
   SettingOutlined,
   MessageOutlined,
   LogoutOutlined,
-  RobotOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
 } from '@ant-design/icons';
@@ -19,8 +18,8 @@ const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
 
 const menuItems = [
-  { key: '/admin', icon: <DashboardOutlined />, label: 'Dashboard' },
-  { key: '/admin/knowledge', icon: <DatabaseOutlined />, label: '知识库管理' },
+  { key: '/admin', icon: <DashboardOutlined />, label: '总览' },
+  { key: '/admin/knowledge', icon: <DatabaseOutlined />, label: '知识库' },
   { key: '/admin/traces', icon: <ApiOutlined />, label: '链路追踪' },
   { key: '/admin/users', icon: <UserOutlined />, label: '用户管理' },
   { key: '/admin/settings', icon: <SettingOutlined />, label: '系统设置' },
@@ -38,58 +37,24 @@ export default function AdminLayout() {
   };
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout className="admin-shell">
       <Sider
         collapsible
         collapsed={collapsed}
         onCollapse={setCollapsed}
         theme="light"
-        width={240}
-        style={{
-          borderRight: '1px solid var(--gray-200)',
-          boxShadow: collapsed ? 'none' : '1px 0 10px rgba(0,0,0,0.04)',
-        }}
+        width={248}
+        className="admin-sider"
+        trigger={null}
       >
-        <div
-          style={{
-            height: 64,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 10,
-            borderBottom: '1px solid var(--gray-100)',
-            padding: '0 16px',
-          }}
-        >
-          <div
-            style={{
-              width: 32,
-              height: 32,
-              minWidth: 32,
-              background: 'linear-gradient(135deg, var(--primary), #8b5cf6)',
-              borderRadius: 10,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#fff',
-              fontSize: 16,
-            }}
-          >
-            <img src="/static/logo.jpg" className="logo-img" alt="AgentOffice" style={{ width: 24, height: 24, borderRadius: 6 }} />
-          </div>
+        <div className="admin-brand">
+          <span className="brand-icon">
+            <img src="/static/logo.jpg" className="logo-img" alt="AgentOffice" />
+          </span>
           {!collapsed && (
-            <span
-              style={{
-                fontSize: 17,
-                fontWeight: 700,
-                background: 'linear-gradient(135deg, var(--primary), #8b5cf6)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                backgroundClip: 'text',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              AgentOffice
+            <span className="brand-copy">
+              <strong>AgentOffice</strong>
+              <span>Admin Console</span>
             </span>
           )}
         </div>
@@ -98,61 +63,41 @@ export default function AdminLayout() {
           selectedKeys={[location.pathname]}
           items={menuItems}
           onClick={({ key }) => navigate(key)}
-          style={{ borderRight: 'none', marginTop: 4 }}
+          className="admin-menu"
         />
       </Sider>
       <Layout>
-        <Header
-          className="admin-header"
-        >
+        <Header className="admin-header">
           <Button
             type="text"
             icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
             onClick={() => setCollapsed(!collapsed)}
-            style={{
-              marginRight: 'auto',
-              width: 40,
-              height: 40,
-              color: 'var(--gray-500)',
-            }}
+            className="icon-button"
           />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div className="admin-header-title">
+            <strong>运营控制台</strong>
+            <span>知识库、调用链路与用户权限</span>
+          </div>
+          <div className="admin-header-actions">
             <Button
-              type="primary"
-              ghost
               icon={<MessageOutlined />}
               onClick={() => navigate('/chat')}
-              size="small"
-              style={{ borderRadius: 8, fontWeight: 500 }}
             >
-              返回问答
+              返回对话
             </Button>
-            <div style={{ width: 1, height: 24, background: 'var(--gray-200)', margin: '0 4px' }} />
-            <div
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: 10,
-                background: 'linear-gradient(135deg, var(--primary), #8b5cf6)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#fff',
-                fontSize: 13,
-                fontWeight: 600,
-              }}
-            >
-              {(user?.nickname || user?.username || 'U')[0].toUpperCase()}
+            <Tag className="role-tag">Admin</Tag>
+            <div className="admin-user">
+              <span className="user-avatar small">
+                {(user?.nickname || user?.username || 'U')[0].toUpperCase()}
+              </span>
+              <Text strong>{user?.nickname || user?.username}</Text>
             </div>
-            <Text strong style={{ fontSize: 13, color: 'var(--gray-700)' }}>
-              {user?.nickname || user?.username}
-            </Text>
             <Button
               type="text"
               icon={<LogoutOutlined />}
               onClick={handleLogout}
               danger
-              style={{ color: 'var(--gray-400)' }}
+              className="icon-button"
             />
           </div>
         </Header>

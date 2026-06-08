@@ -51,6 +51,8 @@ class BrowserTool(BaseTool):
         "action": "可选，默认 read，当前支持 read。",
     }
 
+    required_permissions = frozenset({"network:read"})
+
     def run(self, tool_input: dict[str, Any]) -> ToolResult:
         """读取指定网页内容。"""
         url = str(tool_input.get("url") or "").strip()

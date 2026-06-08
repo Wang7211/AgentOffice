@@ -8,6 +8,7 @@ import {
   Empty,
   Tooltip,
   Dropdown,
+  Tag,
 } from 'antd';
 import {
   SendOutlined,
@@ -18,10 +19,13 @@ import {
   LogoutOutlined,
   SettingOutlined,
   RobotOutlined,
-  UserOutlined,
   MessageOutlined,
   HistoryOutlined,
-  BarsOutlined,
+  MoreOutlined,
+  FileSearchOutlined,
+  DatabaseOutlined,
+  ThunderboltOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
@@ -37,6 +41,33 @@ import type { ChatSession, ChatRecord, Citation } from '../api/chat';
 
 const { Text } = Typography;
 const PENDING_SESSION_PREFIX = '__pending_session__';
+
+const quickPrompts = [
+  {
+    title: '知识库检索',
+    desc: '检索报销制度并整理审批条件',
+    prompt: '检索知识库里的报销流程，并按适用场景整理成表格。',
+    icon: <DatabaseOutlined />,
+  },
+  {
+    title: '文档分析',
+    desc: '提取风险点与待确认事项',
+    prompt: '总结这份合同的关键风险点，并列出需要业务方确认的问题。',
+    icon: <FileSearchOutlined />,
+  },
+  {
+    title: '工作生成',
+    desc: '输出可直接复用的办公材料',
+    prompt: '生成一份项目周会纪要模板，包含进展、风险、决策和下周计划。',
+    icon: <ThunderboltOutlined />,
+  },
+  {
+    title: '系统排查',
+    desc: '分析工具调用与执行链路',
+    prompt: '分析最近工具调用失败的可能原因，并给出排查优先级。',
+    icon: <SafetyCertificateOutlined />,
+  },
+];
 
 export default function Chat() {
   const navigate = useNavigate();
@@ -59,7 +90,6 @@ export default function Chat() {
     setStreaming,
     removeSession,
     updateSessionName,
-    addSession,
   } = useChatStore();
 
   const [inputValue, setInputValue] = useState('');
@@ -77,14 +107,17 @@ export default function Chat() {
   const pendingHistorySessionIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  const currentSession = sessions.find((s) => s.session_id === currentSessionId);
+  const assistantCount = messages.filter((m) => m.role === 'assistant').length;
+
   const loadSessions = useCallback(async () => {
     if (!user) return;
     setLoadingSessions(true);
     try {
-      const data = await listSessions(user.user_id, searchKeyword || undefined);
+      const data = await listSessions(searchKeyword || undefined);
       setSessions(data);
     } catch {
-      // ignore
+      // Session list is non-blocking for the current chat surface.
     } finally {
       setLoadingSessions(false);
     }
@@ -111,45 +144,44 @@ export default function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingContent]);
 
-  // Typing queue timer: drains 1 char every 30ms for "逐字输出" effect
-  // When stream ends, keeps running until queue is fully drained
   useEffect(() => {
     if (streaming) {
       typingTimerRef.current = setInterval(() => {
         const queue = charQueueRef.current;
         if (queue.length > 0) {
-          const char = queue.shift()!;
-          addStreamingChunk(char);
-        } else if (streamCompletedRef.current) {
-          // Queue empty AND stream done → cleanup
-          const sessionId = pendingHistorySessionIdRef.current;
-          pendingHistorySessionIdRef.current = null;
-          streamCompletedRef.current = false;
-          if (typingTimerRef.current) {
-            clearInterval(typingTimerRef.current);
-            typingTimerRef.current = null;
-          }
-          if (sessionId) {
-            getChatHistory(sessionId)
-              .then((records) => {
-                finishStreaming(sessionId, records);
-                loadSessions();
-              })
-              .catch(() => {
-                finishStreaming();
-                loadSessions();
-              });
-          } else {
-            finishStreaming();
-          }
+          addStreamingChunk(queue.shift()!);
+          return;
         }
-      }, 30);
-    } else {
-      if (typingTimerRef.current) {
-        clearInterval(typingTimerRef.current);
-        typingTimerRef.current = null;
-      }
+
+        if (!streamCompletedRef.current) return;
+
+        const sessionId = pendingHistorySessionIdRef.current;
+        pendingHistorySessionIdRef.current = null;
+        streamCompletedRef.current = false;
+        if (typingTimerRef.current) {
+          clearInterval(typingTimerRef.current);
+          typingTimerRef.current = null;
+        }
+
+        if (sessionId) {
+          getChatHistory(sessionId)
+            .then((records) => {
+              finishStreaming(sessionId, records);
+              loadSessions();
+            })
+            .catch(() => {
+              finishStreaming();
+              loadSessions();
+            });
+        } else {
+          finishStreaming();
+        }
+      }, 24);
+    } else if (typingTimerRef.current) {
+      clearInterval(typingTimerRef.current);
+      typingTimerRef.current = null;
     }
+
     return () => {
       if (typingTimerRef.current) {
         clearInterval(typingTimerRef.current);
@@ -158,12 +190,16 @@ export default function Chat() {
     };
   }, [streaming, addStreamingChunk, finishStreaming, loadSessions]);
 
-  const handleNewSession = () => {
-    if (sending) return;
-    setCurrentSession(null);
+  const resetComposer = () => {
     clearStreaming();
     setCitations([]);
     setInputValue('');
+  };
+
+  const handleNewSession = () => {
+    if (sending) return;
+    setCurrentSession(null);
+    resetComposer();
   };
 
   const handleSelectSession = (session: ChatSession) => {
@@ -208,9 +244,7 @@ export default function Chat() {
     abortRef.current = streamChat(
       text,
       targetSessionId,
-      user.user_id,
       (content) => {
-        // 逐字推入队列，由定时器逐字消费
         for (const char of content) {
           charQueueRef.current.push(char);
         }
@@ -232,17 +266,16 @@ export default function Chat() {
       },
       (data) => {
         setSending(false);
-        if (data && data.citations && Array.isArray(data.citations)) {
+        if (data?.citations && Array.isArray(data.citations)) {
           setCitations(data.citations as Citation[]);
         }
-        // Mark stream completed; timer will drain the queue naturally
         pendingHistorySessionIdRef.current = targetSessionId;
         streamCompletedRef.current = true;
       },
       (err) => {
         setSending(false);
         streamCompletedRef.current = true;
-        message.error('发送失败: ' + err.message);
+        message.error(`发送失败：${err.message}`);
       },
     );
   };
@@ -255,12 +288,17 @@ export default function Chat() {
   };
 
   const handleRename = async (sessionId: string) => {
-    if (!editName.trim()) return;
-    try {
-      await renameSession(sessionId, editName.trim());
-      updateSessionName(sessionId, editName.trim());
+    const nextName = editName.trim();
+    if (!nextName) {
       setEditingId(null);
-      message.success('重命名成功');
+      return;
+    }
+
+    try {
+      await renameSession(sessionId, nextName);
+      updateSessionName(sessionId, nextName);
+      setEditingId(null);
+      message.success('会话已重命名');
     } catch {
       message.error('重命名失败');
     }
@@ -291,17 +329,39 @@ export default function Chat() {
     return (name || 'U')[0].toUpperCase();
   };
 
-  const quickPrompts = [
-    'MCP 在智能体体系中解决了哪些问题？',
-    '请解释 RAG 的工作方式。',
-    '知识库分块有哪些常见策略？',
-    '帮我整理一份会议纪要。',
-  ];
+  const renderComposer = (compact = false) => (
+    <div className="chat-input-area">
+      <div className="chat-input-wrapper">
+        <Input.TextArea
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="输入问题，Enter 发送，Shift + Enter 换行"
+          autoSize={{ minRows: compact ? 1 : 2, maxRows: 5 }}
+          disabled={sending}
+          variant="borderless"
+        />
+        <div className="chat-input-actions">
+          <Text type="secondary" className="composer-state">
+            {sending ? '正在回复...' : '企业知识库与工具链已就绪'}
+          </Text>
+          <Button
+            type="primary"
+            icon={<SendOutlined />}
+            onClick={handleSend}
+            loading={sending}
+            disabled={!inputValue.trim()}
+            shape="circle"
+            className="send-button"
+          />
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="chat-layout">
-      {/* ─── Sidebar ─── */}
-      <div className="chat-sidebar">
+      <aside className="chat-sidebar">
         <div className="chat-sidebar-header">
           <div className="chat-sidebar-brand">
             <span className="brand-icon">
@@ -309,25 +369,28 @@ export default function Chat() {
             </span>
             <span className="brand-copy">
               <strong>AgentOffice</strong>
+              <span>AI 办公工作台</span>
             </span>
           </div>
+          <Tag className="role-tag">{isAdmin() ? 'Admin' : 'User'}</Tag>
         </div>
 
         <div className="chat-quick-start">
-          <button className="quick-start-card" onClick={handleNewSession}>
-            <span className="quick-start-icon">
-              <PlusOutlined />
-            </span>
-            <span>
-              <strong>新建对话</strong>
-            </span>
-          </button>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={handleNewSession}
+            block
+            className="new-chat-button"
+          >
+            新建对话
+          </Button>
           {isAdmin() && (
             <Button
-              className="quick-admin-button"
-              type="default"
               icon={<SettingOutlined />}
               onClick={() => navigate('/admin')}
+              block
+              className="quick-admin-button"
             >
               管理后台
             </Button>
@@ -336,27 +399,27 @@ export default function Chat() {
 
         <div className="chat-search">
           <Input
-            prefix={<SearchOutlined style={{ color: 'var(--gray-400)' }} />}
-            placeholder="搜索对话..."
+            prefix={<SearchOutlined />}
+            placeholder="搜索会话"
             value={searchKeyword}
             onChange={(e) => setSearchKeyword(e.target.value)}
             allowClear
-            style={{ height: 40 }}
           />
         </div>
 
         <div className="chat-sessions">
+          {sessions.length > 0 && (
+            <div className="session-group-label">最近会话</div>
+          )}
           {sessions.length === 0 && !loadingSessions && (
-            <div style={{ padding: '40px 16px' }}>
+            <div className="session-empty">
               <Empty
-                image={<MessageOutlined style={{ fontSize: 48, color: 'var(--gray-300)' }} />}
-                description={<span style={{ color: 'var(--gray-400)' }}>暂无对话</span>}
+                image={<MessageOutlined />}
+                description="暂无会话"
               />
             </div>
           )}
-          {sessions.length > 0 && (
-            <div className="session-group-label">最近对话</div>
-          )}
+
           {sessions.map((session) => (
             <div
               key={session.session_id}
@@ -372,16 +435,12 @@ export default function Chat() {
                   onPressEnter={() => handleRename(session.session_id)}
                   onBlur={() => handleRename(session.session_id)}
                   onClick={(e) => e.stopPropagation()}
-                  style={{ width: '100%', height: 32, fontSize: 13 }}
                 />
               ) : (
                 <>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
-                    <HistoryOutlined style={{ color: 'var(--gray-300)', fontSize: 14, flexShrink: 0 }} />
-                    <Text
-                      ellipsis
-                      className="session-name"
-                    >
+                  <div className="session-title">
+                    <HistoryOutlined />
+                    <Text ellipsis className="session-name">
                       {session.session_name || '新对话'}
                     </Text>
                   </div>
@@ -392,12 +451,11 @@ export default function Chat() {
                         size="small"
                         icon={<EditOutlined />}
                         onClick={() => startEditing(session)}
-                        style={{ width: 28, height: 28, minWidth: 28 }}
                       />
                     </Tooltip>
                     <Popconfirm
                       title="删除此会话？"
-                      description="删除后不可恢复"
+                      description="删除后不可恢复。"
                       onConfirm={() => handleDelete(session.session_id)}
                       okText="删除"
                       cancelText="取消"
@@ -408,7 +466,6 @@ export default function Chat() {
                           size="small"
                           danger
                           icon={<DeleteOutlined />}
-                          style={{ width: 28, height: 28, minWidth: 28 }}
                         />
                       </Tooltip>
                     </Popconfirm>
@@ -419,16 +476,19 @@ export default function Chat() {
           ))}
         </div>
 
-        {/* User footer */}
         <div className="chat-sidebar-footer">
           <div className="user-info">
             <div className="user-avatar">
-              {user?.avatar ? <img src={user.avatar} className="avatar-img" alt="avatar" /> : getInitial(user?.nickname || user?.username)}
+              {user?.avatar ? (
+                <img src={user.avatar} className="avatar-img" alt="avatar" />
+              ) : (
+                getInitial(user?.nickname || user?.username)
+              )}
             </div>
-            <div>
+            <div className="user-meta">
               <div className="user-name">{user?.nickname || user?.username}</div>
               <div className="user-role">
-                {user?.role === 'admin' ? '管理员' : '用户'}
+                {user?.role === 'admin' ? '管理员' : '成员'}
               </div>
             </div>
           </div>
@@ -455,53 +515,48 @@ export default function Chat() {
             placement="topRight"
             trigger={['click']}
           >
-            <Button
-              type="text"
-              icon={<BarsOutlined />}
-              style={{ width: 32, height: 32, minWidth: 32, color: 'var(--gray-400)' }}
-            />
+            <Button type="text" icon={<MoreOutlined />} className="icon-button" />
           </Dropdown>
         </div>
-      </div>
+      </aside>
 
-      {/* ─── Main Chat Area ─── */}
-      <div className="chat-main">
+      <main className="chat-main">
+        <header className="chat-header">
+          <div>
+            <div className="chat-header-title">
+              <span className="chat-header-dot" />
+              {currentSession?.session_name || '新对话'}
+            </div>
+            <div className="chat-header-subtitle">
+              {assistantCount > 0 ? `${assistantCount} 条助手回复` : '准备开始一次新的办公会话'}
+            </div>
+          </div>
+          <div className="chat-header-tools">
+            <Tag>RAG</Tag>
+            <Tag>Tools</Tag>
+            <Tag>Trace</Tag>
+          </div>
+        </header>
+
         {currentSessionId || messages.length > 0 ? (
           <>
-            <div className="chat-header">
-              <div className="chat-header-title">
-                <span className="chat-header-dot" />
-                {sessions.find((s) => s.session_id === currentSessionId)?.session_name || '新对话'}
-              </div>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {messages.filter((m) => m.role === 'assistant').length} 条回复
-              </Text>
-            </div>
-
-            <div className="chat-messages">
+            <section className="chat-messages">
               {messages.map((msg) => (
                 <div key={msg.id} className={`message-row ${msg.role}`}>
-                  <div
-                    className={`message-avatar ${msg.role}`}
-                  >
-                    {msg.role === 'user' ? (user?.avatar ? <img src={user.avatar} className="avatar-img" alt="avatar" /> : getInitial(user?.nickname)) : <RobotOutlined />}
+                  <div className={`message-avatar ${msg.role}`}>
+                    {msg.role === 'user' ? (
+                      user?.avatar ? (
+                        <img src={user.avatar} className="avatar-img" alt="avatar" />
+                      ) : (
+                        getInitial(user?.nickname || user?.username)
+                      )
+                    ) : (
+                      <RobotOutlined />
+                    )}
                   </div>
-                  <div>
-                    <div
-                      className="message-bubble"
-                    >
-                      {msg.content}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 11,
-                        color: 'var(--gray-400)',
-                        marginTop: 4,
-                        paddingLeft: msg.role === 'assistant' ? 4 : 0,
-                        paddingRight: msg.role === 'user' ? 4 : 0,
-                        textAlign: msg.role === 'user' ? 'right' : 'left',
-                      }}
-                    >
+                  <div className="message-stack">
+                    <div className="message-bubble">{msg.content}</div>
+                    <div className="message-time">
                       {new Date(msg.create_time).toLocaleTimeString('zh-CN', {
                         hour: '2-digit',
                         minute: '2-digit',
@@ -511,146 +566,71 @@ export default function Chat() {
                 </div>
               ))}
 
-              {/* Streaming */}
               {streaming && (
                 <div className="message-row assistant">
                   <div className="message-avatar assistant">
                     <RobotOutlined />
                   </div>
-                  <div>
+                  <div className="message-stack">
                     <div className="message-bubble streaming">
-                      {streamingContent || <div className="typing-indicator"><span /><span /><span /></div>}
+                      {streamingContent || (
+                        <div className="typing-indicator">
+                          <span />
+                          <span />
+                          <span />
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* Knowledge citations */}
               {!streaming && citations.length > 0 && (
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '10px 16px',
-                    margin: '0 0 12px 0',
-                    fontSize: 13,
-                    color: 'var(--gray-500)',
-                    background: 'var(--gray-50)',
-                    borderRadius: 8,
-                    border: '1px solid var(--gray-100)',
-                  }}
-                >
-                  <span style={{ flexShrink: 0 }}>📄</span>
-                  <span>
-                    引用知识库中的{' '}
-                    {citations.map((c, i) => (
-                      <span key={c.file_name}>
-                        {i > 0 && '、'}
-                        <strong style={{ color: 'var(--primary-color)' }}>{c.file_name}</strong>
-                      </span>
-                    ))}
-                  </span>
+                <div className="citation-strip">
+                  <DatabaseOutlined />
+                  <span>引用知识库文件：</span>
+                  {citations.map((c, i) => (
+                    <strong key={c.file_name}>
+                      {i > 0 ? '、' : ''}
+                      {c.file_name}
+                    </strong>
+                  ))}
                 </div>
               )}
 
               <div ref={messagesEndRef} />
-            </div>
-
-            <div className="chat-input-area">
-              <div className="chat-input-wrapper">
-                <Input.TextArea
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="输入您的问题，按 Enter 发送..."
-                  autoSize={{ minRows: 1, maxRows: 4 }}
-                  disabled={sending}
-                  variant="borderless"
-                />
-                <div className="chat-input-actions">
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {sending ? '正在回复...' : ''}
-                  </Text>
-                  <Button
-                    type="primary"
-                    icon={<SendOutlined />}
-                    onClick={handleSend}
-                    loading={sending}
-                    disabled={!inputValue.trim()}
-                    shape="circle"
-                    style={{
-                      width: 40,
-                      height: 40,
-                      minWidth: 40,
-                      boxShadow: inputValue.trim()
-                        ? '0 2px 8px rgba(79, 110, 247, 0.3)'
-                        : 'none',
-                    }}
-                  />
-                </div>
-              </div>
-            </div>
+            </section>
+            {renderComposer(true)}
           </>
         ) : (
           <>
-            <div className="chat-header">
-              <div className="chat-header-title">
-                <span className="chat-header-dot" />
-                新对话
-              </div>
-            </div>
-
-            <div className="chat-empty-home">
-              <div className="empty-center">
+            <section className="chat-empty-home">
+              <div className="empty-command-panel">
                 <div className="empty-logo">
                   <img src="/static/logo.jpg" className="logo-img" alt="AgentOffice" />
                 </div>
-                <h1>有什么可以帮忙的？</h1>
+                <h1>今天要处理什么？</h1>
                 <div className="prompt-grid">
-                  {quickPrompts.map((prompt) => (
+                  {quickPrompts.map((item) => (
                     <button
-                      key={prompt}
+                      key={item.title}
                       className="prompt-card"
-                      onClick={() => setInputValue(prompt)}
+                      onClick={() => setInputValue(item.prompt)}
                     >
-                      {prompt}
+                      <span className="prompt-icon">{item.icon}</span>
+                      <span>
+                        <strong>{item.title}</strong>
+                        <small>{item.desc}</small>
+                      </span>
                     </button>
                   ))}
                 </div>
               </div>
-            </div>
-
-            <div className="chat-input-area">
-              <div className="chat-input-wrapper">
-                <Input.TextArea
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="输入你的问题..."
-                  autoSize={{ minRows: 1, maxRows: 4 }}
-                  disabled={sending}
-                  variant="borderless"
-                />
-                <div className="chat-input-actions">
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {sending ? '正在回复...' : ''}
-                  </Text>
-                  <Button
-                    type="primary"
-                    icon={<SendOutlined />}
-                    onClick={handleSend}
-                    loading={sending}
-                    disabled={!inputValue.trim()}
-                    shape="circle"
-                    style={{ width: 40, height: 40, minWidth: 40 }}
-                  />
-                </div>
-              </div>
-            </div>
+            </section>
+            {renderComposer()}
           </>
         )}
-      </div>
+      </main>
     </div>
   );
 }

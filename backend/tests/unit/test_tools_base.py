@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from tools.base import BaseTool
+from tools.base import ToolExecutionContext
 from tools.base import ToolRegistry
 from tools.base import ToolResult
 from tools.base import ToolSpec
@@ -46,6 +47,20 @@ class _ConcreteTool(BaseTool):
         return ToolResult(content=str(x * 2), metadata={"input": x})
 
 
+class _ContextTool(BaseTool):
+    name = "context_tool"
+    description = "context aware"
+    input_schema = {"query": "query"}
+    required_permissions = frozenset({"knowledge:read"})
+    context_schema = {"user_id": "upload_user_id"}
+
+    def run(self, tool_input: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            content=str(tool_input["upload_user_id"]),
+            metadata={"tool_input": tool_input},
+        )
+
+
 class TestBaseTool:
     def test_spec_returns_metadata(self) -> None:
         tool = _ConcreteTool()
@@ -59,6 +74,33 @@ class TestBaseTool:
         result = tool.run({"x": 21})
         assert result.content == "42"
         assert result.metadata["input"] == 21
+
+    def test_spec_returns_permissions_and_context_schema(self) -> None:
+        tool = _ContextTool()
+        spec = tool.spec()
+        assert spec.required_permissions == ("knowledge:read",)
+        assert spec.context_schema == {"user_id": "upload_user_id"}
+
+    def test_run_with_context_injects_context_fields(self) -> None:
+        tool = _ContextTool()
+        result = tool.run_with_context(
+            {"query": "policy"},
+            ToolExecutionContext(
+                user_id=42,
+                session_id="s1",
+                permissions=frozenset({"knowledge:read"}),
+            ),
+        )
+        assert result.content == "42"
+        assert result.metadata["tool_input"]["upload_user_id"] == 42
+
+    def test_run_with_context_rejects_missing_permission(self) -> None:
+        tool = _ContextTool()
+        with pytest.raises(ToolException, match="missing permissions"):
+            tool.run_with_context(
+                {"query": "policy"},
+                ToolExecutionContext(user_id=42, session_id="s1"),
+            )
 
 
 # ---------------------------------------------------------------------------

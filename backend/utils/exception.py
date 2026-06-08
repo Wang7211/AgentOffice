@@ -88,7 +88,7 @@ def success_response(data: object = None) -> ORJSONResponse:
     )
 
 
-def error_response(code: int, message: str) -> ORJSONResponse:
+def error_response(code: int, message: str, status_code: int = 200) -> ORJSONResponse:
     """构造统一错误响应。
 
     参数:
@@ -101,7 +101,10 @@ def error_response(code: int, message: str) -> ORJSONResponse:
     异常:
         TypeError: 数据无法序列化时抛出。
     """
-    return ORJSONResponse({"code": code, "message": message, "data": None})
+    return ORJSONResponse(
+        {"code": code, "message": message, "data": None},
+        status_code=status_code,
+    )
 
 
 def register_exception_handlers(application: FastAPI) -> None:
@@ -142,7 +145,11 @@ def register_exception_handlers(application: FastAPI) -> None:
         exc: HTTPException,
     ) -> ORJSONResponse:
         logger.warning("http error: {}", exc.detail)
-        return error_response(code=exc.status_code, message=str(exc.detail))
+        return error_response(
+            code=exc.status_code,
+            message=str(exc.detail),
+            status_code=exc.status_code,
+        )
 
     @application.exception_handler(Exception)
     async def handle_system_exception(

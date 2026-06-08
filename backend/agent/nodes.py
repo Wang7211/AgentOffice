@@ -1,7 +1,10 @@
-"""Agent 图节点实现。"""
+"""Agent graph node implementations."""
+
+from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from typing import Any
 
@@ -13,40 +16,79 @@ from memory.memory_context import MemoryContext
 from memory.store import agent_memory
 from services.llm_service import get_model_client
 from services.tool_service import get_tool_registry
+from tools.base import ToolExecutionContext
 from utils.common import normalize_text
 from utils.exception import ToolException
 
 
+_IMPLICIT_COMPLETED_STEPS = {"understand", "plan"}
+_RETRIEVABLE_MEMORY_KINDS = ["semantic", "episodic"]
+_SEMANTIC_MARKERS = (
+    "请记住",
+    "记住",
+    "以后",
+    "默认",
+    "我喜欢",
+    "我偏好",
+    "我习惯",
+    "我的",
+    "我们公司",
+    "本公司",
+    "规则",
+    "制度",
+    "流程",
+    "偏好",
+    "不要",
+    "必须",
+    "总是",
+    "always",
+    "prefer",
+    "preference",
+    "remember",
+)
+
+
 class AgentNodes:
-    """理解、记忆、规划、工具、行动节点。"""
+    """Nodes used by the Agent LangGraph runtime."""
 
     def __init__(self) -> None:
         self._model_client = get_model_client()
         self._tool_registry = get_tool_registry()
 
     # ------------------------------------------------------------------
-    # 前置记忆节点
+    # Memory nodes
     # ------------------------------------------------------------------
 
     def mem_pre_node(self, state: AgentState) -> AgentState:
-        """前置记忆加载：检索与当前任务相关的长期记忆，注入 state 供意图理解和规划使用。"""
+        """Load user-scoped long-term memories relevant to this task."""
         query = state["task_desc"]
         memories: list[dict[str, Any]] = []
         if query:
             settings = get_settings()
+            user_id = int(state.get("user_id") or 1)
             for item in agent_memory.search_filtered(
                 query=query,
                 top_k=5,
                 min_score=settings.agent_memory_similarity_threshold,
+                metadata_filter={
+                    "user_id": user_id,
+                    "memory_kind": _RETRIEVABLE_MEMORY_KINDS,
+                },
             ):
                 score = float(item.get("score", 0))
                 if score <= 0:
+                    continue
+                metadata = dict(item.get("metadata") or {})
+                if (
+                    metadata.get("memory_kind") == "episodic"
+                    and metadata.get("status") == "failed"
+                ):
                     continue
                 memories.append(
                     {
                         "score": round(score, 4),
                         "text": str(item.get("text") or ""),
-                        "metadata": dict(item.get("metadata") or {}),
+                        "metadata": metadata,
                     }
                 )
         state["relevant_memories"] = memories
@@ -54,15 +96,45 @@ class AgentNodes:
             messages=state.get("messages", []),
             relevant_memories=memories,
         )
-        logger.debug("[记忆] mem_pre 加载 {} 条长期记忆", len(memories))
+        logger.debug("[memory] mem_pre loaded {} memories", len(memories))
         return state
 
-    # ------------------------------------------------------------------
-    # 后置记忆节点
-    # ------------------------------------------------------------------
-
     def mem_post_node(self, state: AgentState) -> AgentState:
-        """后置记忆更新：保存本轮意图、参数和执行结果到长期记忆，为下一轮对话提供上下文。"""
+        """Archive durable semantic notes and execution episodes."""
+        records = self._build_memory_records(state)
+        if not records:
+            logger.debug("[memory] mem_post skipped: no durable memory")
+            return state
+
+        session_id = state.get("session_id", "")
+        normalized_task = state.get("normalized_task") or state["task_desc"]
+        timestamp = time.time()
+
+        for index, record in enumerate(records, start=1):
+            memory_kind = str(record["metadata"]["memory_kind"])
+            memory_id = hashlib.md5(
+                f"{session_id}{normalized_task}{memory_kind}{index}{time.time_ns()}".encode()
+            ).hexdigest()[:16]
+
+            try:
+                metadata = dict(record["metadata"])
+                metadata["timestamp"] = timestamp
+                agent_memory.add_text(
+                    vector_id=f"mem_{memory_kind}_{memory_id}",
+                    text=record["text"],
+                    metadata=metadata,
+                )
+                logger.debug("[memory] mem_post saved kind={}", memory_kind)
+            except Exception as exc:
+                logger.warning("[memory] mem_post save failed: {}", exc)
+
+        return state
+
+    def _build_memory_records(
+        self,
+        state: AgentState,
+    ) -> list[dict[str, Any]]:
+        """Build long-term memory records for the current turn."""
         normalized_task = state.get("normalized_task") or state["task_desc"]
         intent = state.get("intent", {})
         tool_name = str(intent.get("tool_name") or "")
@@ -71,47 +143,181 @@ class AgentNodes:
         error_info = state.get("error_info", "")
         answer = state.get("answer", "")
         session_id = state.get("session_id", "")
+        user_id = int(state.get("user_id") or 1)
+        tool_results = list(state.get("tool_results") or [])
+        tool_calls = list(state.get("tool_calls") or [])
+        status = self._execution_status(tool_results, error_info, tool_result)
 
-        # 构造记忆文本
-        memory_lines = [f"用户问题: {normalized_task}", f"意图: {tool_name or '无需工具'}"]
-        if tool_input:
-            memory_lines.append(f"参数: {json.dumps(tool_input, ensure_ascii=False)}")
-        if tool_result:
-            memory_lines.append(f"工具结果: {tool_result[:200]}")
-        if error_info:
-            memory_lines.append(f"错误: {error_info[:200]}")
-        if answer:
-            memory_lines.append(f"回答: {answer[:200]}")
-        memory_text = "\n".join(memory_lines)
+        base_metadata = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "normalized_task": normalized_task,
+            "type": "agent_memory",
+        }
 
-        memory_id = hashlib.md5(
-            f"{session_id}{normalized_task}{time.time()}".encode()
-        ).hexdigest()[:16]
-
-        try:
-            agent_memory.add_text(
-                vector_id=f"mem_{memory_id}",
-                text=memory_text,
-                metadata={
-                    "session_id": session_id,
-                    "tool_name": tool_name,
-                    "normalized_task": normalized_task,
-                    "timestamp": time.time(),
-                    "type": "agent_execution",
-                },
+        records: list[dict[str, Any]] = []
+        if self._should_archive_episodic(state):
+            records.append(
+                {
+                    "text": self._build_episodic_memory_text(
+                        normalized_task=normalized_task,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        tool_result=tool_result,
+                        error_info=error_info,
+                        answer=answer,
+                        tool_results=tool_results,
+                        tool_calls=tool_calls,
+                        status=status,
+                    ),
+                    "metadata": {
+                        **base_metadata,
+                        "memory_kind": "episodic",
+                        "status": status,
+                        "reusable": status == "success",
+                        "tool_names": ",".join(
+                            self._collect_tool_names(tool_name, tool_results, tool_calls)
+                        ),
+                        "tool_count": len(tool_results or tool_calls),
+                        "plan_step_count": len(state.get("plan") or []),
+                    },
+                }
             )
-            logger.debug("[记忆] mem_post 已保存 (tool={})", tool_name or "none")
-        except Exception as exc:
-            logger.warning("[记忆] mem_post 保存失败: {}", exc)
 
-        return state
+        semantic_text = self._extract_semantic_memory(normalized_task)
+        if semantic_text:
+            records.append(
+                {
+                    "text": self._build_semantic_memory_text(semantic_text),
+                    "metadata": {
+                        **base_metadata,
+                        "memory_kind": "semantic",
+                        "status": "active",
+                        "reusable": True,
+                        "source": "user_explicit",
+                    },
+                }
+            )
+
+        return records
+
+    @staticmethod
+    def _should_archive_episodic(state: AgentState) -> bool:
+        """Only tool executions and execution errors become episodic memory."""
+        return bool(
+            state.get("tool_results")
+            or state.get("tool_calls")
+            or state.get("tool_result")
+            or state.get("error_info")
+            or (state.get("intent") or {}).get("tool_name")
+        )
+
+    @staticmethod
+    def _execution_status(
+        tool_results: list[dict[str, Any]],
+        error_info: str,
+        tool_result: str,
+    ) -> str:
+        if any(item.get("status") == "failed" for item in tool_results):
+            return "failed"
+        if error_info and not tool_result:
+            return "failed"
+        return "success"
+
+    @staticmethod
+    def _collect_tool_names(
+        intent_tool_name: str,
+        tool_results: list[dict[str, Any]],
+        tool_calls: list[dict[str, Any]],
+    ) -> list[str]:
+        names: list[str] = []
+        for item in tool_results:
+            name = str(item.get("tool_name") or "")
+            if name and name not in names:
+                names.append(name)
+        for item in tool_calls:
+            name = str(item.get("tool_name") or "")
+            if name and name not in names:
+                names.append(name)
+        if intent_tool_name and intent_tool_name not in names:
+            names.append(intent_tool_name)
+        return names
+
+    @staticmethod
+    def _extract_semantic_memory(normalized_task: str) -> str:
+        text = normalize_text(normalized_task)
+        if not text:
+            return ""
+        lowered = text.lower()
+        if any(marker.lower() in lowered for marker in _SEMANTIC_MARKERS):
+            return text[:500]
+        if re.search(r"(我的|我们|本公司|公司).{0,24}(是|为|叫|使用|默认|偏好)", text):
+            return text[:500]
+        return ""
+
+    @staticmethod
+    def _build_episodic_memory_text(
+        *,
+        normalized_task: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_result: str,
+        error_info: str,
+        answer: str,
+        tool_results: list[dict[str, Any]],
+        tool_calls: list[dict[str, Any]],
+        status: str,
+    ) -> str:
+        memory_lines = [
+            "Memory kind: episodic",
+            f"Task: {normalized_task}",
+            f"Intent: {tool_name or 'direct_answer'}",
+            f"Execution status: {status}",
+        ]
+        if tool_input:
+            memory_lines.append(
+                f"Input: {json.dumps(tool_input, ensure_ascii=False)}"
+            )
+        if tool_calls:
+            plan_status = [
+                f"{step.get('step_id') or step.get('id')}:{step.get('status', '')}"
+                for step in tool_calls
+            ]
+            memory_lines.append(f"Plan status: {', '.join(plan_status)}")
+        if tool_results:
+            outcomes = []
+            for item in tool_results:
+                name = str(item.get("tool_name") or "")
+                item_status = str(item.get("status") or "")
+                content = str(item.get("content") or "")[:160]
+                error = str(item.get("error_msg") or "")[:160]
+                preview = content if item_status == "success" else f"error={error}"
+                outcomes.append(f"{name}({item_status}): {preview}")
+            memory_lines.append("Tool outcomes: " + " | ".join(outcomes))
+        elif tool_result:
+            memory_lines.append(f"Tool result: {tool_result[:200]}")
+        if error_info:
+            memory_lines.append(f"Error: {error_info[:200]}")
+        if answer:
+            memory_lines.append(f"Answer: {answer[:200]}")
+        return "\n".join(memory_lines)
+
+    @staticmethod
+    def _build_semantic_memory_text(semantic_text: str) -> str:
+        return "\n".join(
+            [
+                "Memory kind: semantic",
+                f"Durable user note: {semantic_text}",
+                "Scope: user preference, user fact, or business rule",
+            ]
+        )
 
     # ------------------------------------------------------------------
-    # 意图理解节点
+    # Understanding and planning
     # ------------------------------------------------------------------
 
     def understand_node(self, state: AgentState) -> AgentState:
-        """识别任务意图，理解任务，提取规范化描述。"""
+        """Identify the task intent and normalize the user request."""
         analysis = self._model_client.analyze_task(
             message=state["task_desc"],
             context=state["messages"],
@@ -125,113 +331,141 @@ class AgentNodes:
         return state
 
     def planning_node(self, state: AgentState) -> AgentState:
-        """任务编排：基于意图生成工具执行计划（支持多步骤序列）。"""
+        """Create a plan and normalize tool steps into executable records."""
         analysis = state["intent"]
         tool_name = str(analysis.get("tool_name") or "")
         tool_input = dict(analysis.get("tool_input") or {})
 
         if not tool_name:
             state["need_tool"] = False
+            state["plan"] = []
             state["tool_calls"] = []
             return state
 
-        # 生成执行计划（LLM 可产出多步骤，本地模型兜底单步）
         tool_specs = self._tool_registry.list_specs()
         specs_dict = [{"name": s.name, "description": s.description} for s in tool_specs]
-
         plan = self._model_client.create_plan(
             analysis=analysis,
             memories=state["relevant_memories"],
             tool_specs=specs_dict,
             memory_ctx=state.get("memory_context"),
         )
+        state["plan"] = list(plan)
 
-        tool_steps = [
-            s for s in plan
-            if s.get("tool_name") and s["tool_name"].strip()
-        ]
-
-        if tool_steps:
-            state["need_tool"] = True
-            state["tool_name"] = tool_steps[0]["tool_name"]
-            state["tool_input"] = tool_steps[0].get("tool_input", {})
-            state["tool_calls"] = [
+        tool_steps = [s for s in plan if str(s.get("tool_name") or "").strip()]
+        if not tool_steps:
+            tool_steps = [
                 {
-                    "tool_name": s["tool_name"],
-                    "tool_input": s.get("tool_input", {}),
+                    "id": "tool_1",
+                    "phase": "tools",
+                    "name": f"Call {tool_name}",
+                    "goal": "Execute required tool",
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "depends_on": ["plan"],
                     "status": "pending",
                 }
-                for s in tool_steps
             ]
-        else:
-            # 兜底：直接使用分析结果作为单步计划
-            state["need_tool"] = True
-            state["tool_calls"] = [
-                {"tool_name": tool_name, "tool_input": tool_input, "status": "pending"},
+            state["plan"] = [
+                {"id": "understand", "phase": "memory", "status": "completed"},
+                {"id": "plan", "phase": "planning", "status": "completed"},
+                dict(tool_steps[0]),
             ]
 
+        state["need_tool"] = True
+        state["tool_name"] = str(tool_steps[0]["tool_name"])
+        state["tool_input"] = dict(tool_steps[0].get("tool_input") or {})
+        state["tool_calls"] = [
+            self._build_tool_step(step, index)
+            for index, step in enumerate(tool_steps, start=1)
+        ]
+        self._sync_plan_status(state)
         return state
 
+    # ------------------------------------------------------------------
+    # Execution and observation
+    # ------------------------------------------------------------------
+
     def tool_node(self, state: AgentState) -> AgentState:
-        """纯工具执行：循环执行工具列表，无硬编码分支。"""
-        if not state["need_tool"] or not state["tool_calls"]:
+        """Execute one runnable tool step from the current plan."""
+        if not state.get("need_tool") or not state.get("tool_calls"):
             return state
 
-        completed: list[dict[str, Any]] = []
-        for step in state["tool_calls"]:
-            tool_name = step["tool_name"]
-            tool_input = step.get("tool_input", {})
-            tool_input = self._resolve_tool_input(tool_name, tool_input, completed)
+        max_steps = int(state.get("max_steps") or 6)
+        if state.get("step_count", 0) >= max_steps:
+            state["error_info"] = "Reached max tool execution steps"
+            self._skip_pending_steps(state, reason="max_steps_reached")
+            self._update_tool_summary(state)
+            self._sync_plan_status(state)
+            return state
 
-            try:
-                tool = self._tool_registry.get(tool_name)
-                result = self._run_tool_via_langchain(tool_name, tool_input)
-                if result is None:
-                    result = tool.run(tool_input)
-                content = normalize_text(result.content)
-                entry = {
-                    "tool_name": tool_name,
-                    "tool_input": tool_input,
-                    "content": content,
-                    "metadata": dict(result.metadata or {}),
-                    "status": "success",
-                    "error_msg": "",
-                }
-                completed.append(entry)
-                step["status"] = "completed"
-                logger.info("[工具] {} 执行成功", tool_name)
-            except (ToolException, ValueError) as exc:
-                message = exc.message if isinstance(exc, ToolException) else str(exc)
-                logger.warning("[工具] {} 执行失败: {}", tool_name, message)
-                entry = {
-                    "tool_name": tool_name,
-                    "tool_input": tool_input,
-                    "content": "",
-                    "status": "failed",
-                    "error_msg": message,
-                }
-                completed.append(entry)
-                step["status"] = "failed"
+        completed = state.get("tool_results", [])
+        step = self._next_runnable_step(state.get("tool_calls", []))
+        if step is None:
+            return state
 
-        state["tool_results"] = completed
-        state["step_count"] += 1
+        tool_name = str(step["tool_name"])
+        tool_input = dict(step.get("tool_input") or {})
+        tool_input = self._resolve_tool_input(tool_name, tool_input, completed)
+        tool_context = self._build_tool_context(state)
+        start_time = time.perf_counter()
 
-        # 汇总结果：合并所有成功工具的输出，避免多工具时后一个覆盖前一个
-        successful = [r for r in completed if r["status"] == "success"]
-        failed = [r for r in completed if r["status"] == "failed"]
-        if successful:
-            merged = "\n\n".join(
-                f"[{r['tool_name']}]\n{r['content']}" for r in successful
+        step["status"] = "running"
+        step["tool_input"] = tool_input
+        try:
+            tool = self._tool_registry.get(tool_name)
+            result = self._run_tool_with_context(tool, tool_name, tool_input, tool_context)
+            entry = self._build_tool_result_entry(
+                step=step,
+                tool_input=self._redact_context_input(tool_input, tool),
+                content=normalize_text(result.content),
+                metadata={
+                    **dict(result.metadata or {}),
+                    "execution_context": {
+                        "user_id": tool_context.user_id,
+                        "session_id": tool_context.session_id,
+                        "permissions": sorted(tool_context.permissions),
+                    },
+                },
+                status="success",
+                error_msg="",
+                start_time=start_time,
             )
-            state["tool_result"] = merged
-        else:
-            state["tool_result"] = ""
-        state["error_info"] = failed[-1]["error_msg"] if failed else ""
+            step["tool_input"] = entry["tool_input"]
+            step["status"] = "completed"
+            step["error_msg"] = ""
+            logger.info("[tool] {} completed step={}", tool_name, step["step_id"])
+        except (ToolException, ValueError) as exc:
+            message = exc.message if isinstance(exc, ToolException) else str(exc)
+            entry = self._build_tool_result_entry(
+                step=step,
+                tool_input=tool_input,
+                content="",
+                metadata={},
+                status="failed",
+                error_msg=message,
+                start_time=start_time,
+            )
+            step["status"] = "failed"
+            step["error_msg"] = message
+            logger.warning("[tool] {} failed step={}: {}", tool_name, step["step_id"], message)
 
+        step["duration_ms"] = entry["duration_ms"]
+        completed.append(entry)
+        state["tool_results"] = completed
+        state["step_count"] = int(state.get("step_count") or 0) + 1
+        self._sync_plan_status(state)
+        return state
+
+    def observe_node(self, state: AgentState) -> AgentState:
+        """Observe execution results and update aggregate plan state."""
+        self._skip_blocked_steps(state)
+        self._update_tool_summary(state)
+        self._sync_plan_status(state)
         return state
 
     def action_node(self, state: AgentState) -> AgentState:
-        """融合记忆和工具结果，生成最终回答。"""
+        """Generate the final answer from memory and tool observations."""
         if state.get("error_info") and not state.get("tool_result"):
             state["answer"] = f"执行过程中遇到问题：{state['error_info']}"
             return state
@@ -245,12 +479,16 @@ class AgentNodes:
         )
         return state
 
+    # ------------------------------------------------------------------
+    # Tool execution helpers
+    # ------------------------------------------------------------------
+
     def _run_tool_via_langchain(
         self,
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> Any | None:
-        """通过 LangChain StructuredTool 执行工具。"""
+        """Execute a registered tool through its LangChain adapter."""
         langchain_tool = self._tool_registry.get_langchain_tool(tool_name)
         if not langchain_tool:
             return None
@@ -266,18 +504,226 @@ class AgentNodes:
             metadata=dict(payload.get("metadata") or {}),
         )
 
+    def _run_tool_with_context(
+        self,
+        tool: Any,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> Any:
+        """Execute tools through the context-aware protocol when available."""
+        required_permissions = getattr(tool, "required_permissions", frozenset())
+        if required_permissions:
+            return tool.run_with_context(tool_input, context)
+        result = self._run_tool_via_langchain(tool_name, tool_input)
+        if result is not None:
+            return result
+        if hasattr(tool, "run_with_context"):
+            return tool.run_with_context(tool_input, context)
+        return tool.run(tool_input)
+
+    @staticmethod
+    def _build_tool_context(state: AgentState) -> ToolExecutionContext:
+        """Build the permission and identity context for one tool invocation."""
+        user_id = int(state.get("user_id") or 0)
+        permissions = {
+            "knowledge:read",
+            "network:read",
+            "email:send",
+            "file:read",
+            "mcp:call",
+        }
+        if user_id <= 0:
+            permissions = set()
+        return ToolExecutionContext(
+            user_id=user_id,
+            session_id=str(state.get("session_id") or ""),
+            permissions=frozenset(permissions),
+            metadata={
+                "task_desc": str(state.get("task_desc") or ""),
+                "normalized_task": str(state.get("normalized_task") or ""),
+            },
+        )
+
+    @staticmethod
+    def _redact_context_input(
+        tool_input: dict[str, Any],
+        tool: Any,
+    ) -> dict[str, Any]:
+        """Hide protocol-injected fields from trace-visible tool input."""
+        visible_input = dict(tool_input)
+        context_schema = getattr(tool, "context_schema", {}) or {}
+        for input_key in context_schema.values():
+            visible_input.pop(str(input_key), None)
+        return visible_input
+
+    @staticmethod
+    def _build_tool_step(step: dict[str, Any], index: int) -> dict[str, Any]:
+        step_id = str(step.get("id") or f"tool_{index}")
+        deps = step.get("depends_on") or []
+        if isinstance(deps, str):
+            deps = [deps]
+        elif not isinstance(deps, list):
+            deps = []
+        return {
+            "id": step_id,
+            "step_id": step_id,
+            "phase": str(step.get("phase") or "tools"),
+            "name": str(step.get("name") or f"Tool step {index}"),
+            "goal": str(step.get("goal") or ""),
+            "depends_on": [str(dep) for dep in deps],
+            "tool_name": str(step.get("tool_name") or ""),
+            "tool_input": dict(step.get("tool_input") or {}),
+            "status": "pending",
+            "error_msg": "",
+        }
+
+    @staticmethod
+    def _build_tool_result_entry(
+        step: dict[str, Any],
+        tool_input: dict[str, Any],
+        content: str,
+        metadata: dict[str, Any],
+        status: str,
+        error_msg: str,
+        start_time: float,
+    ) -> dict[str, Any]:
+        return {
+            "step_id": step.get("step_id") or step.get("id"),
+            "phase": step.get("phase", "tools"),
+            "name": step.get("name", ""),
+            "goal": step.get("goal", ""),
+            "depends_on": list(step.get("depends_on") or []),
+            "tool_name": step.get("tool_name", ""),
+            "tool_input": tool_input,
+            "content": content,
+            "metadata": metadata,
+            "status": status,
+            "error_msg": error_msg,
+            "duration_ms": round((time.perf_counter() - start_time) * 1000, 2),
+        }
+
+    @classmethod
+    def _next_runnable_step(
+        cls,
+        tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        for step in tool_calls:
+            if step.get("status") != "pending":
+                continue
+            if cls._dependencies_satisfied(step, tool_calls):
+                return step
+        return None
+
+    @classmethod
+    def _dependencies_satisfied(
+        cls,
+        step: dict[str, Any],
+        tool_calls: list[dict[str, Any]],
+    ) -> bool:
+        deps = [str(dep) for dep in step.get("depends_on", [])]
+        return all(cls._dependency_completed(dep, tool_calls) for dep in deps)
+
+    @staticmethod
+    def _dependency_completed(dep: str, tool_calls: list[dict[str, Any]]) -> bool:
+        if dep in _IMPLICIT_COMPLETED_STEPS:
+            return True
+        for step in tool_calls:
+            if str(step.get("step_id") or step.get("id")) == dep:
+                return step.get("status") == "completed"
+        return False
+
+    @staticmethod
+    def _dependency_failed(dep: str, tool_calls: list[dict[str, Any]]) -> bool:
+        if dep in _IMPLICIT_COMPLETED_STEPS:
+            return False
+        for step in tool_calls:
+            if str(step.get("step_id") or step.get("id")) == dep:
+                return step.get("status") in {"failed", "skipped"}
+        return False
+
+    @classmethod
+    def _skip_blocked_steps(cls, state: AgentState) -> None:
+        tool_calls = state.get("tool_calls", [])
+        changed = True
+        while changed:
+            changed = False
+            for step in tool_calls:
+                if step.get("status") != "pending":
+                    continue
+                deps = [str(dep) for dep in step.get("depends_on", [])]
+                failed_dep = next(
+                    (dep for dep in deps if cls._dependency_failed(dep, tool_calls)),
+                    "",
+                )
+                if failed_dep:
+                    step["status"] = "skipped"
+                    step["error_msg"] = f"dependency_failed:{failed_dep}"
+                    changed = True
+
+    @staticmethod
+    def _skip_pending_steps(state: AgentState, reason: str) -> None:
+        for step in state.get("tool_calls", []):
+            if step.get("status") == "pending":
+                step["status"] = "skipped"
+                step["error_msg"] = reason
+
+    @staticmethod
+    def _sync_plan_status(state: AgentState) -> None:
+        tool_status = {
+            str(step.get("step_id") or step.get("id")): step
+            for step in state.get("tool_calls", [])
+        }
+        synced: list[dict[str, Any]] = []
+        for step in state.get("plan", []):
+            item = dict(step)
+            step_id = str(item.get("id") or "")
+            tool_step = tool_status.get(step_id)
+            if tool_step:
+                item["status"] = tool_step.get("status", item.get("status", "pending"))
+                item["tool_input"] = tool_step.get("tool_input", item.get("tool_input", {}))
+                item["error_msg"] = tool_step.get("error_msg", "")
+                if "duration_ms" in tool_step:
+                    item["duration_ms"] = tool_step["duration_ms"]
+            synced.append(item)
+        state["plan"] = synced
+
+    @staticmethod
+    def _update_tool_summary(state: AgentState) -> None:
+        successful = [
+            r for r in state.get("tool_results", [])
+            if r.get("status") == "success"
+        ]
+        failed = [
+            r for r in state.get("tool_results", [])
+            if r.get("status") == "failed"
+        ]
+        if successful:
+            state["tool_result"] = "\n\n".join(
+                f"[{r['tool_name']}]\n{r['content']}" for r in successful
+            )
+        else:
+            state["tool_result"] = ""
+        if failed:
+            state["error_info"] = str(failed[-1].get("error_msg") or "")
+        elif not state.get("error_info"):
+            skipped = [
+                s for s in state.get("tool_calls", [])
+                if s.get("status") == "skipped"
+            ]
+            state["error_info"] = str(skipped[-1].get("error_msg") or "") if skipped else ""
+
+    # ------------------------------------------------------------------
+    # Cross-step input resolution
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _resolve_tool_input(
         tool_name: str,
         tool_input: dict[str, Any],
         completed: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """在执行前解析工具入参：将前序（同轮次）工具结果注入后续步骤。
-
-        当前支持：
-          - email.body 为简短标题时，自动填充已完成 weather 工具的数据。
-          - email.to 为空时，从 subject/body 中提取邮箱地址。
-        """
+        """Resolve tool inputs from prior successful steps."""
         if tool_name != "email":
             return tool_input
         resolved = AgentNodes._resolve_email_body(tool_input, completed)
@@ -289,7 +735,6 @@ class AgentNodes:
         tool_input: dict[str, Any],
         completed: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """同轮次 weather→email 正文注入。"""
         body = tool_input.get("body", "")
         if not body:
             return tool_input
@@ -298,8 +743,10 @@ class AgentNodes:
         if len(body) >= 50:
             return tool_input
         weather_result = next(
-            (r for r in completed
-             if r.get("tool_name") == "weather" and r.get("status") == "success"),
+            (
+                r for r in completed
+                if r.get("tool_name") == "weather" and r.get("status") == "success"
+            ),
             None,
         )
         if not weather_result:
@@ -313,7 +760,6 @@ class AgentNodes:
 
     @staticmethod
     def _resolve_email_to(tool_input: dict[str, Any]) -> dict[str, Any]:
-        """email.to 为空时，从 subject/body 中提取邮箱地址。"""
         import re
 
         to_val = tool_input.get("to", "")
@@ -323,7 +769,8 @@ class AgentNodes:
         for field in ("subject", "body"):
             val = str(resolved.get(field, ""))
             match = re.search(
-                r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", val,
+                r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+                val,
             )
             if match:
                 resolved["to"] = match.group(0)

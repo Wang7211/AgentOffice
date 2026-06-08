@@ -44,6 +44,13 @@ class TestKnowledgeTool:
         assert "没有找到" in result.content
         assert result.metadata["matches"] == []
 
+    @mock.patch("tools.knowledge_tool.vector_memory.search_filtered")
+    def test_run_scopes_search_by_upload_user_id(self, mock_search) -> None:
+        mock_search.return_value = []
+        self._tool.run({"query": "policy", "upload_user_id": 42})
+        kwargs = mock_search.call_args.kwargs
+        assert kwargs["metadata_filter"] == {"upload_user_id": 42}
+
     def test_filter_by_category_rejects_incompatible(self) -> None:
         """测试类别不匹配的文档被过滤掉。"""
         results = [

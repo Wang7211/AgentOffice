@@ -134,6 +134,8 @@ class WeatherTool(BaseTool):
     description = "查询指定城市的实时天气和未来 3 天天气预报。"
     input_schema = {"city": "必填，城市名称，例如 北京、上海。"}
 
+    required_permissions = frozenset({"network:read"})
+
     def _resolve_coords(self, client: httpx.Client, city: str) -> tuple[float, float]:
         """根据城市名解析经纬度。"""
         coords = CITY_COORDS.get(city)

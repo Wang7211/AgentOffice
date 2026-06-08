@@ -80,18 +80,17 @@ class TestChatEndpoint:
             json={"message": "你好", "stream": False},
             headers={"Authorization": f"Bearer {auth_token}"},
         )
-        assert response.status_code in (200, 404, 500)
-        if response.status_code == 200:
-            data = response.json()
-            assert "answer" in data or "data" in data
+        assert response.status_code == 200
+        data = response.json()
+        assert "data" in data
+        assert "answer" in data["data"]
 
     def test_chat_without_auth(self, client: TestClient) -> None:
         response = client.post(
             "/api/chat/completions",
             json={"message": "你好"},
         )
-        # 可能 401 或 200（取决于路由是否受保护）
-        assert response.status_code in (200, 401, 403, 404)
+        assert response.status_code == 401
 
     def test_chat_history(self, client: TestClient, auth_token: str) -> None:
         response = client.get(
@@ -99,14 +98,14 @@ class TestChatEndpoint:
             headers={"Authorization": f"Bearer {auth_token}"},
         )
         # 无内容时返回空列表而不是报错
-        assert response.status_code in (200, 404, 500)
+        assert response.status_code == 200
 
     def test_chat_sessions(self, client: TestClient, auth_token: str) -> None:
         response = client.get(
             "/api/chat/sessions",
             headers={"Authorization": f"Bearer {auth_token}"},
         )
-        assert response.status_code in (200, 404, 500)
+        assert response.status_code == 200
 
 
 # -----------------------------------------------------------------------
@@ -114,14 +113,20 @@ class TestChatEndpoint:
 # -----------------------------------------------------------------------
 
 class TestToolEndpoint:
-    def test_list_tools(self, client: TestClient) -> None:
-        response = client.get("/api/tool/list")
-        assert response.status_code in (200, 404)
-        if response.status_code == 200:
-            data = response.json()
-            assert isinstance(data, dict)
-            # 工具列表应包含内置工具
-            assert "data" in data
+    def test_list_tools(self, client: TestClient, auth_token: str) -> None:
+        response = client.get(
+            "/api/tool/list",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, dict)
+        assert "data" in data
+        tools = data["data"]
+        assert any("required_permissions" in item for item in tools)
+        knowledge = next(item for item in tools if item["name"] == "knowledge")
+        assert "knowledge:read" in knowledge["required_permissions"]
+        assert knowledge["context_schema"] == {"user_id": "upload_user_id"}
 
 
 # -----------------------------------------------------------------------
@@ -152,14 +157,74 @@ class TestAdminEndpoints:
             "/api/admin/dashboard",
             headers={"Authorization": f"Bearer {auth_token}"},
         )
-        assert response.status_code in (200, 404, 403, 500)
+        assert response.status_code == 200
+
+    def test_trace_detail_uses_tool_user_record_context(
+        self,
+        client: TestClient,
+        auth_token: str,
+    ) -> None:
+        from database.db import SessionLocal
+        from database.tables import ChatRecord
+        from database.tables import ChatSession
+        from database.tables import ToolRecord
+        from utils.common import generate_uuid
+
+        db_session = SessionLocal()
+        try:
+            session_id = generate_uuid()
+            db_session.add(ChatSession(
+                session_id=session_id,
+                user_id=1,
+                session_name="trace context test",
+                model_name="local",
+            ))
+            db_session.flush()
+            user_record = ChatRecord(
+                session_id=session_id,
+                role="user",
+                content="user question",
+                token_cost=1,
+            )
+            db_session.add(user_record)
+            db_session.flush()
+            db_session.add(ChatRecord(
+                session_id=session_id,
+                role="assistant",
+                content="assistant answer",
+                token_cost=1,
+            ))
+            db_session.flush()
+            tool_record = ToolRecord(
+                chat_record_id=user_record.id,
+                tool_name="knowledge",
+                tool_input="{}",
+                tool_result="ok",
+                cost_time=0.01,
+                status=1,
+            )
+            db_session.add(tool_record)
+            db_session.commit()
+            trace_id = tool_record.id
+        finally:
+            db_session.close()
+
+        response = client.get(
+            f"/api/admin/traces/{trace_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["user_message"] == "user question"
+        assert data["assistant_message"] == "assistant answer"
 
     def test_users_list(self, client: TestClient, auth_token: str) -> None:
         response = client.get(
             "/api/admin/users",
             headers={"Authorization": f"Bearer {auth_token}"},
         )
-        assert response.status_code in (200, 404, 403, 500)
+        assert response.status_code == 200
 
 
 # -----------------------------------------------------------------------

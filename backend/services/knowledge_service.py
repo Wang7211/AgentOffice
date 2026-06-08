@@ -116,7 +116,12 @@ class KnowledgeService:
             "chunk_count": len(chunks),
         }
 
-    def search(self, query: str, top_k: int = 5) -> list[dict[str, object]]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        upload_user_id: int | None = None,
+    ) -> list[dict[str, object]]:
         """检索已索引的知识分片。
 
         参数:
@@ -129,7 +134,16 @@ class KnowledgeService:
         异常:
             无。
         """
-        return vector_memory.search(query=query, top_k=top_k)
+        metadata_filter = (
+            {"upload_user_id": upload_user_id}
+            if upload_user_id is not None
+            else None
+        )
+        return vector_memory.search_filtered(
+            query=query,
+            top_k=top_k,
+            metadata_filter=metadata_filter,
+        )
 
     def _validate_upload(self, file_suffix: str, file_size: int) -> None:
         """校验上传文件元数据。"""
@@ -218,6 +232,7 @@ class KnowledgeService:
                 metadata={
                     "file_id": file_record.id,
                     "file_name": file_record.file_name,
+                    "upload_user_id": file_record.upload_user_id,
                     "chunk_index": index,
                     "document_category": document_category,
                 },

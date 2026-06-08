@@ -1,5 +1,10 @@
 """后台管理接口路由。"""
 
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import Query
@@ -8,6 +13,7 @@ from sqlalchemy import func
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
+from api.auth_route import require_admin_user
 from database.db import get_db
 from database.tables import ChatRecord
 from database.tables import ChatSession
@@ -17,12 +23,33 @@ from database.tables import SysUser
 from database.tables import SystemConfig
 from database.tables import ToolRecord
 from utils.auth import hash_password
+from utils.common import now_datetime
 from utils.exception import ParameterException
 from utils.exception import success_response
 from utils.structured_log import log_agent_event
 
 
-admin_router = APIRouter(prefix="/admin", tags=["admin"])
+admin_router = APIRouter(
+    prefix="/admin",
+    tags=["admin"],
+    dependencies=[Depends(require_admin_user)],
+)
+
+LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def _local_isoformat(value: datetime) -> str:
+    """Serialize DB UTC timestamps as local dashboard time."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(LOCAL_TIMEZONE).replace(tzinfo=None).isoformat()
+
+
+def _local_datetime(value: datetime) -> datetime:
+    """Convert DB UTC timestamps to local naive datetimes for bucketing."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(LOCAL_TIMEZONE).replace(tzinfo=None)
 
 
 # ─── Dashboard ─────────────────────────────────────────────
@@ -46,9 +73,65 @@ async def dashboard_stats(
         is_delete=0,
     ).scalar() or 0
     tool_call_count = db_session.query(func.count(ToolRecord.id)).scalar() or 0
-    today_chat_count = db_session.query(func.count(ChatRecord.id)).filter(
-        func.date(ChatRecord.create_time) == func.current_date(),
+    tool_success_count = db_session.query(func.count(ToolRecord.id)).filter(
+        ToolRecord.status == 1,
     ).scalar() or 0
+    tool_failure_count = db_session.query(func.count(ToolRecord.id)).filter(
+        ToolRecord.status != 1,
+    ).scalar() or 0
+    avg_tool_cost = db_session.query(func.avg(ToolRecord.cost_time)).scalar() or 0
+    recent_costs = [
+        row[0]
+        for row in db_session.query(ToolRecord.cost_time).order_by(
+            desc(ToolRecord.create_time),
+        ).limit(100).all()
+    ]
+    sorted_costs = sorted(float(cost or 0) for cost in recent_costs)
+    p95_tool_cost = (
+        sorted_costs[min(len(sorted_costs) - 1, int(len(sorted_costs) * 0.95))]
+        if sorted_costs
+        else 0
+    )
+    local_now = now_datetime().astimezone(LOCAL_TIMEZONE)
+    today_start_local = local_now.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    today_start_utc = today_start_local.astimezone(timezone.utc).replace(tzinfo=None)
+    tomorrow_start_utc = (
+        today_start_local + timedelta(days=1)
+    ).astimezone(timezone.utc).replace(tzinfo=None)
+    today_chat_count = db_session.query(func.count(ChatRecord.id)).filter(
+        ChatRecord.create_time >= today_start_utc,
+        ChatRecord.create_time < tomorrow_start_utc,
+    ).scalar() or 0
+    latest_record_time = max(
+        [now_datetime().replace(tzinfo=None)]
+        + [
+            row[0]
+            for row in db_session.query(ChatRecord.create_time).order_by(
+                desc(ChatRecord.create_time),
+            ).limit(1).all()
+        ]
+        + [
+            row[0]
+            for row in db_session.query(ToolRecord.create_time).order_by(
+                desc(ToolRecord.create_time),
+            ).limit(1).all()
+        ],
+    )
+    recent_since = latest_record_time - timedelta(hours=24)
+    recent_chat_records = db_session.query(ChatRecord.create_time).filter(
+        ChatRecord.create_time >= recent_since,
+    ).all()
+    recent_tool_records = db_session.query(
+        ToolRecord.create_time,
+        ToolRecord.status,
+    ).filter(
+        ToolRecord.create_time >= recent_since,
+    ).all()
     recent_sessions = db_session.query(ChatSession).filter_by(
         is_delete=0,
     ).order_by(desc(ChatSession.update_time)).limit(10).all()
@@ -61,12 +144,21 @@ async def dashboard_stats(
         "file_count": file_count,
         "chunk_count": chunk_count,
         "tool_call_count": tool_call_count,
+        "tool_success_count": tool_success_count,
+        "tool_failure_count": tool_failure_count,
+        "avg_tool_cost": float(avg_tool_cost),
+        "p95_tool_cost": float(p95_tool_cost),
         "today_chat_count": today_chat_count,
+        "hourly_activity": _build_hourly_activity(
+            end_time=_local_datetime(latest_record_time),
+            recent_chat_records=recent_chat_records,
+            recent_tool_records=recent_tool_records,
+        ),
         "recent_sessions": [
             {
                 "session_id": s.session_id,
                 "session_name": s.session_name,
-                "create_time": s.create_time.isoformat(),
+                "create_time": _local_isoformat(s.create_time),
             }
             for s in recent_sessions
         ],
@@ -76,11 +168,60 @@ async def dashboard_stats(
                 "tool_name": t.tool_name,
                 "status": t.status,
                 "cost_time": t.cost_time,
-                "create_time": t.create_time.isoformat(),
+                "create_time": _local_isoformat(t.create_time),
             }
             for t in recent_tools
         ],
     })
+
+
+def _build_hourly_activity(
+    end_time,
+    recent_chat_records: list[tuple],
+    recent_tool_records: list[tuple],
+) -> list[dict[str, int | str]]:
+    """Build a compact 24-hour activity series for Dashboard."""
+    buckets: list[dict[str, int | str]] = []
+    bucket_index: dict[str, dict[str, int | str]] = {}
+    for offset in range(23, -1, -1):
+        hour = (end_time - timedelta(hours=offset)).replace(
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        key = hour.strftime("%Y-%m-%d %H")
+        bucket = {
+            "label": hour.strftime("%H:00"),
+            "chat_count": 0,
+            "tool_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+        }
+        buckets.append(bucket)
+        bucket_index[key] = bucket
+
+    for (created_at,) in recent_chat_records:
+        key = _local_datetime(created_at).replace(minute=0, second=0, microsecond=0).strftime(
+            "%Y-%m-%d %H",
+        )
+        bucket = bucket_index.get(key)
+        if bucket:
+            bucket["chat_count"] = int(bucket["chat_count"]) + 1
+
+    for created_at, status in recent_tool_records:
+        key = _local_datetime(created_at).replace(minute=0, second=0, microsecond=0).strftime(
+            "%Y-%m-%d %H",
+        )
+        bucket = bucket_index.get(key)
+        if not bucket:
+            continue
+        bucket["tool_count"] = int(bucket["tool_count"]) + 1
+        if status == 1:
+            bucket["success_count"] = int(bucket["success_count"]) + 1
+        else:
+            bucket["failure_count"] = int(bucket["failure_count"]) + 1
+
+    return buckets
 
 
 # ─── User Management ──────────────────────────────────────
@@ -113,7 +254,7 @@ async def list_users(
                 "role": u.role,
                 "avatar": u.avatar or "/static/default-avatar.jpg",
                 "status": u.status,
-                "create_time": u.create_time.isoformat(),
+                "create_time": _local_isoformat(u.create_time),
             }
             for u in users
         ],
@@ -203,7 +344,7 @@ async def list_knowledge_files(
                 "file_suffix": f.KnowledgeFile.file_suffix,
                 "file_size": f.KnowledgeFile.file_size,
                 "chunk_count": f.chunk_count,
-                "create_time": f.KnowledgeFile.create_time.isoformat(),
+                "create_time": _local_isoformat(f.KnowledgeFile.create_time),
             }
             for f in items
         ],
@@ -240,7 +381,7 @@ async def list_file_chunks(
                 "chunk_index": c.chunk_index,
                 "chunk_text": c.chunk_text,
                 "vector_id": c.vector_id,
-                "create_time": c.create_time.isoformat(),
+                "create_time": _local_isoformat(c.create_time),
             }
             for c in chunks
         ],
@@ -304,7 +445,7 @@ async def list_traces(
             "cost_time": r.cost_time,
             "status": r.status,
             "error_msg": r.error_msg,
-            "create_time": r.create_time.isoformat(),
+            "create_time": _local_isoformat(r.create_time),
             "session_name": session.session_name if session else None,
         })
     return success_response({
@@ -335,14 +476,24 @@ async def get_trace_detail(
     user_message = None
     assistant_message = None
     if chat_record:
-        user_msg = db_session.query(ChatRecord).filter(
-            ChatRecord.session_id == chat_record.session_id,
-            ChatRecord.id < chat_record.id,
-            ChatRecord.role == "user",
-        ).order_by(desc(ChatRecord.id)).first()
-        if user_msg:
-            user_message = user_msg.content
-        assistant_message = chat_record.content
+        if chat_record.role == "user":
+            user_message = chat_record.content
+            assistant_msg = db_session.query(ChatRecord).filter(
+                ChatRecord.session_id == chat_record.session_id,
+                ChatRecord.id > chat_record.id,
+                ChatRecord.role == "assistant",
+            ).order_by(ChatRecord.id.asc()).first()
+            if assistant_msg:
+                assistant_message = assistant_msg.content
+        else:
+            assistant_message = chat_record.content
+            user_msg = db_session.query(ChatRecord).filter(
+                ChatRecord.session_id == chat_record.session_id,
+                ChatRecord.id < chat_record.id,
+                ChatRecord.role == "user",
+            ).order_by(desc(ChatRecord.id)).first()
+            if user_msg:
+                user_message = user_msg.content
     return success_response({
         "id": record.id,
         "tool_name": record.tool_name,
@@ -351,7 +502,7 @@ async def get_trace_detail(
         "cost_time": record.cost_time,
         "status": record.status,
         "error_msg": record.error_msg,
-        "create_time": record.create_time.isoformat(),
+        "create_time": _local_isoformat(record.create_time),
         "session_name": session.session_name if session else None,
         "session_id": session.session_id if session else None,
         "user_message": user_message,

@@ -16,12 +16,16 @@ class TestAgentGraphRouting:
             user_message="你好",
             session_id="s1",
             history=[{"role": "user", "content": "之前的问题"}],
+            user_id=42,
         )
         assert state["task_desc"] == "你好"
         assert state["session_id"] == "s1"
+        assert state["user_id"] == 42
         assert len(state["messages"]) == 1
         assert state["need_tool"] is False
+        assert state["plan"] == []
         assert state["step_count"] == 0
+        assert state["max_steps"] == 6
         assert state["answer"] == ""
 
     # ------------------------------------------------------------------
@@ -52,12 +56,16 @@ class TestAgentGraphRouting:
             tool_name="",
             tool_input={},
             tool_result="",
+            plan=[],
             tool_calls=[],
             tool_results=[],
             step_count=0,
+            max_steps=6,
             error_info="",
             answer="",
             session_id="",
+            user_id=1,
+            memory_context=None,
         )
         route = self._graph._route_after_planning(state)
         assert route == "action"
@@ -75,7 +83,38 @@ class TestAgentGraphRouting:
         expected_keys = {
             "messages", "task_desc", "normalized_task", "intent",
             "need_tool", "relevant_memories", "tool_name", "tool_input",
-            "tool_result", "tool_calls", "tool_results", "step_count",
-            "error_info", "answer", "session_id", "memory_context",
+            "tool_result", "plan", "tool_calls", "tool_results", "step_count",
+            "max_steps",
+            "error_info", "answer", "session_id", "user_id", "memory_context",
         }
         assert set(result.keys()) == expected_keys
+
+    def test_route_after_observe_continues_for_runnable_step(self) -> None:
+        state = {
+            "step_count": 1,
+            "max_steps": 6,
+            "tool_calls": [
+                {"step_id": "weather", "status": "completed"},
+                {
+                    "step_id": "email",
+                    "status": "pending",
+                    "depends_on": ["weather"],
+                },
+            ],
+        }
+        assert self._graph._route_after_observe(state) == "tool"
+
+    def test_route_after_observe_stops_without_runnable_step(self) -> None:
+        state = {
+            "step_count": 1,
+            "max_steps": 6,
+            "tool_calls": [
+                {"step_id": "weather", "status": "failed"},
+                {
+                    "step_id": "email",
+                    "status": "pending",
+                    "depends_on": ["weather"],
+                },
+            ],
+        }
+        assert self._graph._route_after_observe(state) == "action"

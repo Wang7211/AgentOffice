@@ -1,42 +1,43 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  Card,
-  Table,
   Button,
-  Upload,
-  Modal,
-  Typography,
-  Tag,
-  message,
-  Space,
-  Popconfirm,
   Drawer,
-  List,
   Empty,
-  Tooltip,
-  Row,
-  Col,
+  Input,
+  List,
+  message,
+  Popconfirm,
+  Table,
+  Tag,
+  Typography,
+  Upload,
 } from 'antd';
 import {
-  UploadOutlined,
   DeleteOutlined,
   EyeOutlined,
+  FileOutlined,
   FileTextOutlined,
   InboxOutlined,
-  FileOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  UploadOutlined,
 } from '@ant-design/icons';
+import dayjs from 'dayjs';
 import {
-  listKnowledgeFiles,
   deleteKnowledgeFile,
   getFileChunks,
+  listKnowledgeFiles,
   uploadKnowledge,
 } from '../../api/admin';
-import type { KnowledgeFileItem, ChunkItem } from '../../api/admin';
-import dayjs from 'dayjs';
+import type { ChunkItem, KnowledgeFileItem } from '../../api/admin';
 
-const { Title, Paragraph } = Typography;
-
+const { Paragraph } = Typography;
 const { Dragger } = Upload;
+
+const formatSize = (size: number) => {
+  if (size > 1024) return `${(size / 1024).toFixed(1)} MB`;
+  return `${size} KB`;
+};
 
 export default function KnowledgeBase() {
   const [files, setFiles] = useState<KnowledgeFileItem[]>([]);
@@ -44,6 +45,7 @@ export default function KnowledgeBase() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [keyword, setKeyword] = useState('');
 
   const [chunkDrawerOpen, setChunkDrawerOpen] = useState(false);
   const [chunkFile, setChunkFile] = useState<{ id: number; name: string } | null>(null);
@@ -51,15 +53,32 @@ export default function KnowledgeBase() {
   const [chunksTotal, setChunksTotal] = useState(0);
   const [chunksLoading, setChunksLoading] = useState(false);
 
-  const loadFiles = async (p: number) => {
+  const filteredFiles = useMemo(() => {
+    const q = keyword.trim().toLowerCase();
+    if (!q) return files;
+    return files.filter((file) => file.file_name.toLowerCase().includes(q));
+  }, [files, keyword]);
+
+  const stats = useMemo(() => {
+    const chunkCount = files.reduce((sum, file) => sum + (file.chunk_count || 0), 0);
+    const suffixCount = new Set(files.map((file) => file.file_suffix)).size;
+    return [
+      { label: '知识库文件', value: files.length, icon: <InboxOutlined />, tag: '全部' },
+      { label: '文本分片', value: chunkCount, icon: <FileTextOutlined />, tag: '全部' },
+      { label: '文件类型', value: suffixCount, icon: <FileOutlined />, tag: '自动识别' },
+      { label: '当前页记录', value: filteredFiles.length, icon: <SearchOutlined />, tag: '筛选后' },
+    ];
+  }, [files, filteredFiles.length]);
+
+  const loadFiles = async (nextPage: number) => {
     setLoading(true);
     try {
-      const result = await listKnowledgeFiles(p, 20);
+      const result = await listKnowledgeFiles(nextPage, 20);
       setFiles(result.items);
       setTotal(result.total);
       setPage(result.page);
     } catch {
-      message.error('加载失败');
+      message.error('加载知识库文件失败');
     } finally {
       setLoading(false);
     }
@@ -73,7 +92,7 @@ export default function KnowledgeBase() {
     setUploading(true);
     try {
       const result = await uploadKnowledge(file);
-      message.success(`上传成功，共 ${result.chunk_count} 个文本分片`);
+      message.success(`上传成功，共生成 ${result.chunk_count} 个文本分片`);
       loadFiles(1);
     } catch (err: any) {
       message.error(err.response?.data?.message || err.message || '上传失败');
@@ -110,14 +129,14 @@ export default function KnowledgeBase() {
 
   const columns = [
     {
-      title: '文件名',
+      title: '名称',
       dataIndex: 'file_name',
       key: 'file_name',
       ellipsis: true,
       render: (name: string) => (
-        <span>
-          <FileOutlined style={{ marginRight: 8, color: 'var(--gray-400)' }} />
-          {name}
+        <span className="name-cell">
+          <FileOutlined />
+          <strong>{name}</strong>
         </span>
       ),
     },
@@ -125,146 +144,143 @@ export default function KnowledgeBase() {
       title: '类型',
       dataIndex: 'file_suffix',
       key: 'file_suffix',
-      width: 80,
-      render: (s: string) => <Tag>{s.toUpperCase()}</Tag>,
+      width: 100,
+      render: (suffix: string) => <Tag className="soft-tag">{suffix.toUpperCase()}</Tag>,
     },
     {
       title: '大小',
       dataIndex: 'file_size',
       key: 'file_size',
-      width: 100,
-      render: (size: number) =>
-        size > 1024
-          ? `${(size / 1024).toFixed(1)} MB`
-          : `${size} KB`,
+      width: 110,
+      render: formatSize,
     },
     {
       title: '分片',
       dataIndex: 'chunk_count',
       key: 'chunk_count',
-      width: 80,
-      render: (n: number) => (
-        <span style={{ fontWeight: 600, color: 'var(--primary)' }}>{n}</span>
-      ),
+      width: 100,
+      render: (count: number) => <strong className="numeric-accent">{count}</strong>,
     },
     {
       title: '上传时间',
       dataIndex: 'create_time',
       key: 'create_time',
-      width: 170,
-      render: (t: string) => (
-        <span style={{ fontSize: 12, color: 'var(--gray-500)' }}>
-          {dayjs(t).format('YYYY-MM-DD HH:mm')}
-        </span>
+      width: 180,
+      render: (time: string) => (
+        <span className="table-muted">{dayjs(time).format('YYYY/MM/DD HH:mm')}</span>
       ),
     },
     {
       title: '操作',
       key: 'actions',
-      width: 150,
+      width: 170,
       render: (_: any, record: KnowledgeFileItem) => (
-        <Space>
-          <Button
-            type="link"
-            size="small"
-            icon={<EyeOutlined />}
-            onClick={() => handleViewChunks(record)}
-            style={{ padding: 0 }}
-          >
+        <div className="table-actions">
+          <Button icon={<EyeOutlined />} onClick={() => handleViewChunks(record)}>
             分片
           </Button>
           <Popconfirm
-            title="确定删除此文件？"
-            description="删除后相关分片也将不可用"
+            title="删除此文件？"
+            description="删除后相关文本分片也将不可用。"
             okText="删除"
             cancelText="取消"
             onConfirm={() => handleDelete(record.id)}
           >
-            <Button type="link" size="small" danger icon={<DeleteOutlined />} style={{ padding: 0 }}>
-              删除
-            </Button>
+            <Button danger icon={<DeleteOutlined />} />
           </Popconfirm>
-        </Space>
+        </div>
       ),
     },
   ];
 
   return (
-    <div className="fade-in">
-      <div className="page-header">
-        <Title level={4}>知识库管理</Title>
-        <Upload
-          beforeUpload={handleUpload}
-          showUploadList={false}
-          accept=".pdf,.txt,.docx"
-          disabled={uploading}
-        >
-          <Button
-            type="primary"
-            icon={<UploadOutlined />}
-            loading={uploading}
-            style={{ fontWeight: 600 }}
-          >
-            上传文件
+    <div className="admin-page fade-in">
+      <div className="admin-breadcrumb">首页 / 知识库管理</div>
+      <div className="admin-page-toolbar">
+        <div>
+          <h1>知识库管理</h1>
+          <p>管理企业文档、文本分片与检索素材</p>
+        </div>
+        <div className="toolbar-actions">
+          <Input
+            prefix={<SearchOutlined />}
+            placeholder="搜索知识库文件"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+            allowClear
+            className="toolbar-search"
+          />
+          <Button icon={<ReloadOutlined />} onClick={() => loadFiles(page)}>
+            刷新
           </Button>
-        </Upload>
-      </div>
-
-      <Row gutter={[20, 20]}>
-        <Col xs={24} lg={6}>
-          <Dragger
+          <Upload
             beforeUpload={handleUpload}
             showUploadList={false}
             accept=".pdf,.txt,.docx"
             disabled={uploading}
-            style={{
-              background: 'var(--gray-50)',
-              border: '2px dashed var(--gray-200)',
-              borderRadius: 14,
-              padding: '20px 0',
-            }}
           >
-            <p style={{ fontSize: 14, color: 'var(--gray-400)' }}>
-              <InboxOutlined style={{ fontSize: 36, color: 'var(--primary)', display: 'block', marginBottom: 12 }} />
-              点击或拖拽文件到此区域上传
-            </p>
-            <p style={{ fontSize: 12, color: 'var(--gray-400)' }}>支持 PDF、TXT、DOCX 格式</p>
-          </Dragger>
-        </Col>
-        <Col xs={24} lg={18}>
-          <Card className="admin-card" bodyStyle={{ padding: 0 }}>
-            <Table
-              dataSource={files}
-              columns={columns}
-              rowKey="id"
-              loading={loading}
-              pagination={{
-                current: page,
-                total,
-                pageSize: 20,
-                onChange: loadFiles,
-                showTotal: (t) => `共 ${t} 个文件`,
-                style: { paddingRight: 16 },
-              }}
-              locale={{
-                emptyText: (
-                  <Empty
-                    description="暂无知识库文件"
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  />
-                ),
-              }}
-            />
-          </Card>
-        </Col>
-      </Row>
+            <Button type="primary" icon={<UploadOutlined />} loading={uploading}>
+              上传文档
+            </Button>
+          </Upload>
+        </div>
+      </div>
+
+      <div className="stat-strip">
+        {stats.map((item) => (
+          <div className="summary-tile" key={item.label}>
+            <span className="summary-icon">{item.icon}</span>
+            <div>
+              <small>{item.label}</small>
+              <strong>{item.value}</strong>
+            </div>
+            <Tag>{item.tag}</Tag>
+          </div>
+        ))}
+      </div>
+
+      <section className="ops-panel kb-workspace">
+        <Dragger
+          beforeUpload={handleUpload}
+          showUploadList={false}
+          accept=".pdf,.txt,.docx"
+          disabled={uploading}
+          className="kb-dropzone"
+        >
+          <InboxOutlined />
+          <strong>拖拽文档到此处上传</strong>
+          <span>支持 PDF、TXT、DOCX 格式</span>
+        </Dragger>
+
+        <Table
+          dataSource={filteredFiles}
+          columns={columns}
+          rowKey="id"
+          loading={loading}
+          pagination={{
+            current: page,
+            total,
+            pageSize: 20,
+            onChange: loadFiles,
+            showTotal: (count) => `共 ${count} 个文件`,
+          }}
+          locale={{
+            emptyText: (
+              <Empty
+                description="暂无知识库文件"
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+              />
+            ),
+          }}
+        />
+      </section>
 
       <Drawer
         title={
-          <span>
-            <FileTextOutlined style={{ marginRight: 8, color: 'var(--primary)' }} />
-            分片预览 — {chunkFile?.name}
-            <Tag style={{ marginLeft: 8 }}>{chunksTotal} 个分片</Tag>
+          <span className="drawer-title">
+            <FileTextOutlined />
+            分片预览 / {chunkFile?.name}
+            <Tag>{chunksTotal} 个分片</Tag>
           </span>
         }
         open={chunkDrawerOpen}
@@ -272,36 +288,25 @@ export default function KnowledgeBase() {
           setChunkDrawerOpen(false);
           setChunkFile(null);
         }}
-        width={640}
+        width={720}
       >
         <List
           loading={chunksLoading}
           dataSource={chunks}
           locale={{ emptyText: <Empty description="暂无分片" /> }}
           renderItem={(chunk) => (
-            <List.Item style={{ padding: 0, marginBottom: 12, border: 'none' }}>
-              <Card
-                size="small"
-                className="admin-card"
-                title={
-                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--gray-500)' }}>
-                    分片 #{chunk.chunk_index + 1}
-                  </span>
-                }
-                extra={
-                  <Tag style={{ fontSize: 10 }}>
-                    {chunk.vector_id?.slice(0, 8)}...
-                  </Tag>
-                }
-                style={{ width: '100%' }}
-              >
+            <List.Item className="chunk-item">
+              <div className="chunk-card">
+                <header>
+                  <strong>分片 #{chunk.chunk_index + 1}</strong>
+                  <Tag>{chunk.vector_id?.slice(0, 10)}...</Tag>
+                </header>
                 <Paragraph
                   ellipsis={{ rows: 5, expandable: true, symbol: '展开全文' }}
-                  style={{ whiteSpace: 'pre-wrap', margin: 0, fontSize: 13, color: 'var(--gray-600)' }}
                 >
                   {chunk.chunk_text}
                 </Paragraph>
-              </Card>
+              </div>
             </List.Item>
           )}
         />

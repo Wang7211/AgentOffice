@@ -1,431 +1,232 @@
 # AgentOffice
 
-> 智能 Agent 办公助手，基于 LangGraph 编排引擎，支持多工具调用、RAG 知识库、三层记忆体系和实时对话。
+AgentOffice 是一个面向企业办公场景的智能 Agent 系统。项目提供对话式任务处理、知识库检索、工具调用、链路追踪、后台管理、用户认证和用户级数据隔离，适合作为企业 Agent 原型继续扩展。
 
-[![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-00a393.svg)](https://fastapi.tiangolo.com)
-[![LangGraph](https://img.shields.io/badge/LangGraph-Latest-1c3c3c.svg)](https://langchain-ai.github.io/langgraph/)
-[![React](https://img.shields.io/badge/React-18+-61dafb.svg)](https://react.dev)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+## 功能概览
 
----
-
-## 目录
-
-- [项目简介](#项目简介)
-- [系统架构](#系统架构)
-- [功能特性](#功能特性)
-- [技术栈](#技术栈)
-- [快速开始](#快速开始)
-- [配置说明](#配置说明)
-- [项目结构](#项目结构)
-- [API 文档](#api-文档)
-- [Docker 部署](#docker-部署)
-- [测试](#测试)
-- [许可证](#许可证)
-
----
-
-## 项目简介
-
-AgentOffice 是一个企业级 AI Agent 系统。它结合了 **LangGraph 驱动的 Agent 编排引擎**、**FastAPI 后端**、**React 前端**以及模块化工具生态，提供智能任务自动化、文档分析和知识检索能力。
-
-Agent 遵循完整的推理闭环：**记忆调取 → 意图理解 → 任务规划 → 工具调用 → 回答生成 → 记忆归档**。
-
----
-
-## 系统架构
-
-```
-┌─ 客户端 ──────────────────────────────────────────┐
-│  React SPA / API Client                           │
-└──────────────────────┬────────────────────────────┘
-                       │ HTTP / SSE
-┌─ API 层 ─────────────┴────────────────────────────┐
-│  FastAPI (main.py)                                 │
-│  路由: /api/chat, /api/knowledge, /api/auth ...     │
-└──────────────────────┬────────────────────────────┘
-                       │
-┌─ 服务层 ─────────────┴────────────────────────────┐
-│  ChatService      对话编排                         │
-│  ├─ ChatMemory  (短期滑动窗口)                     │
-│  ├─ RedisKV     (会话/摘要缓存)                    │
-│  └─ AgentGraph  (LangGraph 工作流)                 │
-│                                                    │
-│  LLMService      模型抽象                          │
-│  ├─ LocalModelClient (规则兜底)                    │
-│  └─ OpenAICompatible (Qwen/DeepSeek/OpenAI)        │
-│                                                    │
-│  ToolService     工具注册                          │
-│  ├─ 7个内置工具 + MCP 远程工具                     │
-│  └─ 跨工具依赖注入 (weather → email)               │
-│                                                    │
-│  KnowledgeService  RAG 文档处理                    │
-│  └─ Milvus 向量检索                                │
-└──────────────────────┬────────────────────────────┘
-                       │
-┌─ Agent 层 ───────────┴────────────────────────────┐
-│  LangGraph StateGraph (6 节点)                     │
-│                                                    │
-│  mem_pre     检索 Milvus 长期记忆                  │
-│    ↓                                              │
-│  understand  三层意图识别 (关键词→向量→LLM)       │
-│    ↓                                              │
-│  planning    生成工具执行计划                      │
-│    ↓        ↘                                      │
-│  tool        顺序执行工具链 + 参数自动注入         │
-│    ↓                                              │
-│  action      融合记忆与工具结果生成回答            │
-│    ↓                                              │
-│  mem_post    归档本轮执行记录到 Milvus             │
-└──────────────────────┬────────────────────────────┘
-                       │
-┌─ 存储层 ─────────────┴────────────────────────────┐
-│  内存    ChatMemory    (对话滑动窗口 20条)          │
-│  Redis   会话/LLM/摘要缓存                         │
-│  Milvus  agent_memory + knowledge (向量)           │
-│  MySQL   ChatSession/ChatRecord/ToolRecord          │
-└───────────────────────────────────────────────────┘
-```
-
----
-
-## 功能特性
-
-- **🤖 智能 Agent** — LangGraph 驱动的 6 节点工作流：记忆 → 理解 → 规划 → 工具 → 行动 → 归档
-- **🔧 多工具生态** — 内置天气、邮件、代码、文件、时间、知识库、浏览器 7 种工具，支持跨工具依赖注入
-- **🧠 三层记忆体系** — 短期对话滑动窗口 + Milvus 向量长期记忆 + Redis 缓存（会话/LLM/摘要）
-- **🎯 三层意图识别** — 关键词快速匹配(L1) → 哈希向量相似度(L2) → LLM 深度推理(L3)，平衡速度与准确率
-- **📚 RAG 知识库** — 基于 Milvus 的文档向量检索，支持相似度阈值过滤和文档分类
-- **💬 对话式 UI** — React SPA，支持 SSE 流式对话、会话管理
-- **🔗 MCP 协议支持** — 通过 Model Context Protocol 自动发现并集成远程工具
-- **🔐 认证与权限** — JWT 认证 + 用户权限控制
-- **🐳 Docker 部署** — 一键启动 MySQL + Redis + Agent 服务
-- **📊 结构化日志** — 完整的 Agent 执行链路追踪
-
----
+- 对话 Agent：基于 LangGraph 编排“记忆加载 -> 意图识别 -> 任务规划 -> 工具执行 -> 观察 -> 回答生成 -> 记忆归档”流程。
+- 真正执行器：planner 不只是顺序调用工具，支持多步骤计划、依赖检查、失败跳过、最大步数保护和工具结果观察。
+- 记忆系统：区分短期对话记忆、长期语义记忆和执行事件记忆，避免把普通聊天或失败工具结果当成可复用事实。
+- 工具协议：工具声明 `required_permissions` 和 `context_schema`，执行器统一传入用户、会话和权限上下文。
+- 用户隔离：聊天记录、知识库检索、Agent 记忆和管理接口均按当前用户隔离。
+- RAG 知识库：支持 PDF、TXT、DOCX 上传、分片、向量检索和文档类别过滤。
+- 内置工具：天气、邮件、计算、文件解析、时间、知识库检索、网页读取。
+- MCP 扩展：可通过 MCP HTTP 端点发现并注册远程工具。
+- 后台管理：提供总览、知识库、链路追踪、用户管理和系统配置页面。
 
 ## 技术栈
 
 ### 后端
 
-| 组件 | 技术 |
-|-----------|-----------|
-| 框架 | [FastAPI](https://fastapi.tiangolo.com/) |
-| Agent 引擎 | [LangGraph](https://langchain-ai.github.io/langgraph/) |
-| ORM | [SQLAlchemy 2.0](https://www.sqlalchemy.org/) |
-| 数据库 | [MySQL 8.0](https://www.mysql.com/) |
-| 向量存储 | [Milvus Lite](https://milvus.io/) / [Milvus](https://milvus.io/) |
-| 缓存 | [Redis 7](https://redis.io/) |
+| 模块 | 技术 |
+| --- | --- |
+| Web 框架 | FastAPI |
+| Agent 编排 | LangGraph |
+| ORM | SQLAlchemy 2.x |
+| 数据库 | MySQL 8 |
+| 缓存 | Redis 7 |
+| 向量存储 | Milvus |
 | 认证 | JWT + bcrypt |
+| 工具适配 | 内置工具 + MCP HTTP |
 
 ### 前端
 
-| 组件 | 技术 |
-|-----------|-----------|
-| 框架 | [React 18](https://react.dev) |
-| 构建工具 | [Vite](https://vitejs.dev) |
-| UI 库 | [Ant Design](https://ant.design) |
-| 状态管理 | [Zustand](https://github.com/pmndrs/zustand) |
-| 路由 | [React Router 6](https://reactrouter.com) |
+| 模块 | 技术 |
+| --- | --- |
+| 框架 | React 18 |
+| 构建 | Vite |
+| UI | Ant Design 5 |
+| 状态管理 | Zustand |
+| 路由 | React Router 6 |
 
-### LLM 支持
+## Agent 流程
 
-- 通义千问 (Qwen)
-- OpenAI (GPT-4o)
-- DeepSeek
-- 本地规则引擎兜底（无需 API 密钥）
+```text
+用户输入
+  -> ChatService 恢复会话历史和 Redis 摘要
+  -> mem_pre 加载当前用户可复用的长期记忆
+  -> understand 识别意图并规范化任务
+  -> planning 生成工具计划
+  -> tool 执行一个可运行工具步骤
+  -> observe 更新计划状态、聚合成功/失败结果
+  -> tool / action 根据依赖和剩余步骤继续执行或生成回答
+  -> mem_post 归档语义记忆或执行事件记忆
+```
 
----
+## 项目结构
+
+```text
+AgentOffice/
+├── backend/
+│   ├── agent/                 # LangGraph 状态、节点和图
+│   ├── api/                   # 聊天、认证、管理、知识库接口
+│   ├── config/                # 环境配置
+│   ├── database/              # SQLAlchemy 连接和表模型
+│   ├── integrations/          # MCP 客户端
+│   ├── memory/                # 短期记忆、向量记忆、Redis KV
+│   ├── schemas/               # Pydantic 数据模型
+│   ├── services/              # Chat/LLM/Knowledge/Tool/MCP 服务
+│   ├── tools/                 # 内置工具和工具协议
+│   ├── utils/                 # 认证、异常、日志、通用工具
+│   ├── tests/                 # 单元测试和集成测试
+│   ├── app.py                 # FastAPI 应用工厂
+│   └── main.py                # 后端启动入口
+├── frontend/
+│   ├── src/
+│   │   ├── api/               # API 调用封装
+│   │   ├── components/        # 通用组件
+│   │   ├── pages/             # 聊天和后台页面
+│   │   ├── stores/            # Zustand 状态
+│   │   └── styles/            # 全局样式
+│   └── vite.config.ts
+├── data/                      # 上传文件和本地向量数据
+├── logs/                      # 运行日志
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── .env.example
+```
 
 ## 快速开始
 
 ### 环境要求
 
 - Python 3.12+
-- Node.js 18+（前端开发需要）
-- Docker（推荐）或 MySQL 8.0 + Redis 7
+- Node.js 18+
+- Docker Desktop，或本地 MySQL 8 + Redis 7
 
-### 方式一：Docker 一键启动（推荐）
+### 1. 准备环境变量
 
-```bash
-# 克隆项目
-git clone https://github.com/yourusername/AgentOffice.git
-cd AgentOffice
-
-# 配置环境变量
-cp .env.example .env
-# 编辑 .env 填入 LLM API Key 等配置
-
-# 启动所有服务
-docker compose up -d
-
-# 查看日志
-docker compose logs -f
+```powershell
+Copy-Item .env.example .env
 ```
 
-访问 http://localhost:8000/docs 查看 API 文档。
+按需修改 `.env`。本地 Docker Compose 默认暴露：
 
-### 方式二：本地开发
+- MySQL: `127.0.0.1:3307`
+- Redis: `127.0.0.1:6379`
 
-```bash
-# 创建并激活虚拟环境
-conda create -n agentoffice python=3.12
-conda activate agentoffice
+如果使用 compose 里的 MySQL，建议本地开发连接：
 
-# 安装依赖
-pip install -r requirements.txt
+```env
+DATABASE_URL=mysql+pymysql://agentoffice:agentoffice123@127.0.0.1:3307/agentoffice?charset=utf8mb4
+TEST_DATABASE_URL=mysql+pymysql://agentoffice:agentoffice123@127.0.0.1:3307/agentoffice_test?charset=utf8mb4
+REDIS_URL=redis://localhost:6379/0
+```
 
-# 配置环境变量
-cp .env.example .env
-# 编辑 .env，填入数据库和 LLM 配置
+### 2. 启动 MySQL 和 Redis
 
-# 启动 MySQL 和 Redis（可用 Docker）
+```powershell
 docker compose up -d mysql redis
+```
 
-# 启动后端
+### 3. 启动后端
+
+项目作者当前使用的 Conda 环境：
+
+```powershell
+conda activate agentoffice
+```
+
+首次安装依赖：
+
+```powershell
+pip install -r requirements.txt
+pip install "pymilvus[milvus_lite]>=2.4.0"
+```
+
+启动服务：
+
+```powershell
 cd backend
 python main.py
+```
 
-# 另开终端 — 启动前端
+后端默认地址：
+
+- API: `http://127.0.0.1:8000/api`
+- Swagger: `http://127.0.0.1:8000/docs`
+
+### 4. 启动前端
+
+```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
-### 访问服务
+前端默认地址：`http://127.0.0.1:3000`
 
-| 服务 | 地址 |
-|---------|-----|
-| Web 界面 | http://localhost:3000 |
-| API 文档 | http://localhost:8000/docs |
-| API 直连 | http://localhost:8000/api |
+## Docker 运行
 
----
+完整启动：
 
-## 配置说明
-
-### 环境变量
-
-核心配置项（`.env` 文件）：
-
-```env
-# 应用配置
-APP_ENV=production
-APP_PORT=8000
-
-# 数据库
-DATABASE_URL=mysql+pymysql://agentoffice:agentoffice123@127.0.0.1:3306/agentoffice?charset=utf8mb4
-
-# Redis（可选，不可用时系统自动降级）
-REDIS_URL=redis://localhost:6379/0
-
-# LLM 供应商（选其一）
-MODEL_PROVIDER=qwen
-QWEN_API_KEY=sk-...
-QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-QWEN_MODEL=qwen3.6-plus
-
-# SMTP 邮件配置
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USERNAME=
-SMTP_PASSWORD=
-SMTP_FROM_EMAIL=
-
-# RAG 配置
-KNOWLEDGE_SIMILARITY_THRESHOLD=0.12
-AGENT_MEMORY_SIMILARITY_THRESHOLD=0.08
-
-# MCP 配置（可选）
-MCP_HTTP_ENDPOINT=
-MCP_API_KEY=
-```
-
-### LLM 供应商
-
-| 供应商 | `MODEL_PROVIDER` | 所需密钥 |
-|----------|-----------------|---------------|
-| 通义千问 | `qwen` | `QWEN_API_KEY` |
-| OpenAI | `openai` | `OPENAI_API_KEY` |
-| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` |
-
-> 未配置 API 密钥时，系统会自动回退到本地规则引擎，可处理天气、时间、计算等基础任务，无需任何外部依赖。
-
----
-
-## 项目结构
-
-```
-AgentOffice/
-├── backend/                          # FastAPI 后端服务
-│   ├── main.py                       # 应用入口
-│   ├── app.py                        # FastAPI 应用工厂
-│   │
-│   ├── agent/                        # Agent 编排引擎
-│   │   ├── state.py                  # LangGraph AgentState 定义
-│   │   ├── nodes.py                  # 6 个 Agent 节点实现
-│   │   └── graph.py                  # LangGraph StateGraph 流水线
-│   │
-│   ├── api/                          # REST API 路由
-│   │   ├── route.py                  # 聊天与工具接口
-│   │   ├── auth_route.py             # 认证相关接口
-│   │   └── admin_route.py            # 管理后台接口
-│   │
-│   ├── services/                     # 业务服务层
-│   │   ├── llm_service.py            # LLM 客户端（Qwen/OpenAI/DeepSeek）
-│   │   ├── chat_service.py           # 聊天业务编排
-│   │   ├── knowledge_service.py      # 知识库 RAG 服务
-│   │   ├── tool_service.py           # 工具注册与调度
-│   │   └── mcp_service.py            # MCP 协议服务
-│   │
-│   ├── tools/                        # 工具实现
-│   │   ├── base.py                   # 工具基类与 ToolRegistry
-│   │   ├── weather_tool.py           # 天气查询（Open-Meteo API）
-│   │   ├── email_tool.py             # 邮件发送（SMTP）
-│   │   ├── code_tool.py              # Python 代码执行
-│   │   ├── file_tool.py              # 文件读取
-│   │   ├── browser_tool.py           # 网页抓取
-│   │   ├── knowledge_tool.py         # RAG 知识检索
-│   │   └── time_tool.py              # 时间查询
-│   │
-│   ├── memory/                       # 三层记忆模块
-│   │   ├── chat_memory.py            # 短期记忆（滑动窗口 + 自动压缩）
-│   │   ├── vector_memory.py          # Milvus 向量记忆 + RedisKV
-│   │   ├── memory_context.py         # 统一记忆上下文
-│   │   └── store.py                  # 单例记忆存储适配器
-│   │
-│   ├── database/                     # 数据库层
-│   │   ├── db.py                     # 会话与引擎配置
-│   │   ├── tables.py                 # SQLAlchemy 模型
-│   │   └── init_mysql.sql            # 数据库初始化脚本
-│   │
-│   ├── config/                       # 全局配置
-│   │   └── settings.py               # Pydantic 配置类
-│   │
-│   ├── utils/                        # 通用工具
-│   │   ├── auth.py                   # JWT、密码哈希
-│   │   ├── exception.py              # 错误码与异常处理
-│   │   ├── common.py                 # 通用函数
-│   │   ├── document_classifier.py    # 文档分类器
-│   │   └── structured_log.py         # 结构化日志
-│   │
-│   ├── schemas/                      # Pydantic 数据模型
-│   │   ├── chat.py                   # 聊天数据模型
-│   │   ├── knowledge.py              # 知识库数据模型
-│   │   └── tool.py                   # 工具数据模型
-│   │
-│   ├── integrations/                 # 外部集成
-│   │   └── mcp_client.py             # MCP HTTP 客户端
-│   │
-│   ├── static/                       # 静态资源
-│   │
-│   └── tests/                        # 测试用例
-│       ├── conftest.py               # 测试配置
-│       ├── unit/                     # 单元测试（170+）
-│       └── integration/              # 集成测试
-│
-├── frontend/                         # React SPA
-│   ├── src/
-│   │   ├── pages/                    # 页面组件
-│   │   ├── components/               # 共享组件
-│   │   ├── stores/                   # Zustand 状态管理
-│   │   ├── api/                      # API 调用封装
-│   │   └── styles/                   # 全局样式
-│   └── vite.config.ts
-│
-├── data/                             # 本地数据（Docker volume）
-│   ├── uploads/                      # 上传文件
-│   └── vector_store/                 # Milvus Lite 向量库
-├── logs/                             # 日志文件
-├── Dockerfile                        # Docker 构建文件
-├── requirements.txt                  # Python 依赖
-├── docker-compose.yml                # Docker 编排（MySQL+Redis+App）
-├── .env.example                      # 环境变量模板
-└── .gitignore                        # Git 忽略规则
-```
-
----
-
-## API 文档
-
-### 认证
-
-| 方法 | 端点 | 说明 |
-|--------|----------|-------------|
-| POST | `/api/auth/login` | 用户登录 |
-| POST | `/api/auth/register` | 用户注册 |
-| GET | `/api/auth/me` | 获取当前用户信息 |
-
-### 聊天
-
-| 方法 | 端点 | 说明 |
-|--------|----------|-------------|
-| POST | `/api/chat/completions` | 发送消息并获取回复 |
-| GET | `/api/chat/stream` | SSE 流式聊天 |
-| GET | `/api/chat/history` | 获取聊天历史 |
-| GET | `/api/chat/sessions` | 获取会话列表 |
-| PUT | `/api/chat/sessions/{id}` | 重命名会话 |
-| DELETE | `/api/chat/sessions/{id}` | 删除会话 |
-
-### 工具
-
-| 方法 | 端点 | 说明 |
-|--------|----------|-------------|
-| GET | `/api/tool/list` | 获取可用工具列表 |
-
-### 知识库
-
-| 方法 | 端点 | 说明 |
-|--------|----------|-------------|
-| POST | `/api/knowledge/search` | 搜索知识库 |
-| POST | `/api/knowledge/upload` | 上传文档（PDF/TXT/DOCX） |
-
-> 服务运行时可访问 `/docs` 查看交互式 API 文档（Swagger UI）。
-
----
-
-## Docker 部署
-
-```bash
-# 启动所有服务
+```powershell
 docker compose up -d
+```
 
-# 查看日志
-docker compose logs -f
+停止服务：
 
-# 停止服务
+```powershell
 docker compose down
 ```
 
-Docker Compose 启动的服务：
+Compose 服务：
 
-| 容器 | 镜像 | 端口 |
-|-----------|-------|---------|
-| agent-office | 自构建 (python:3.12-slim) | 8000 |
-| agent-office-mysql | mysql:8.0 | 3307 → 3306 |
-| agent-office-redis | redis:7-alpine | 6379 |
+| 服务 | 容器 | 端口 |
+| --- | --- | --- |
+| 后端 | `agent-office` | `8000` |
+| MySQL | `agent-office-mysql` | `3307 -> 3306` |
+| Redis | `agent-office-redis` | `6379` |
 
-Redis 不可用时系统自动降级，不影响核心功能。
+## 主要接口
 
----
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/health` | 健康检查 |
+| POST | `/api/auth/login` | 登录 |
+| POST | `/api/auth/register` | 注册 |
+| GET | `/api/auth/me` | 当前用户 |
+| POST | `/api/chat/completions` | 发送消息并返回 Agent 回答 |
+| GET | `/api/chat/history` | 会话历史 |
+| GET | `/api/chat/sessions` | 会话列表 |
+| POST | `/api/knowledge/upload` | 上传知识库文档 |
+| POST | `/api/knowledge/search` | 搜索知识库 |
+| GET | `/api/tool/list` | 工具列表和权限声明 |
+| GET | `/api/admin/dashboard` | 后台总览 |
+| GET | `/api/admin/traces` | 工具链路追踪 |
+| GET | `/api/admin/config` | 系统配置 |
 
-## 测试
+完整接口以 `/docs` 为准。
 
-```bash
-# 运行所有单元测试
-cd backend
-python -m pytest tests/unit/ -v
+## 配置说明
 
-# 运行集成测试
-python -m pytest tests/integration/ -v
+常用环境变量：
 
-# 运行全部测试
-python -m pytest tests/ -v
-```
+| 变量 | 说明 |
+| --- | --- |
+| `DATABASE_URL` | 业务数据库连接 |
+| `TEST_DATABASE_URL` | 测试数据库连接 |
+| `REDIS_URL` | Redis 连接 |
+| `MODEL_PROVIDER` | 模型供应商，支持 `qwen`、`openai`、`deepseek` |
+| `QWEN_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | 模型密钥 |
+| `SMTP_HOST` / `SMTP_FROM_EMAIL` | 邮件发送配置 |
+| `UPLOAD_DIR` | 知识库上传目录 |
+| `VECTOR_STORE_DIR` | 本地向量存储目录 |
+| `KNOWLEDGE_SIMILARITY_THRESHOLD` | 知识库检索相似度阈值 |
+| `AGENT_MEMORY_SIMILARITY_THRESHOLD` | Agent 记忆检索相似度阈值 |
+| `MCP_HTTP_ENDPOINT` | MCP HTTP 工具端点 |
+| `JWT_SECRET_KEY` | JWT 签名密钥，生产环境必须替换 |
 
----
+未配置外部 LLM Key 时，系统会回退到本地规则模型，仍可处理部分天气、时间、计算、知识库等基础任务。
 
-## 许可证
+## 当前设计边界
 
-本项目基于 MIT 许可证开源。详见 [LICENSE](LICENSE) 文件。
+- 工具权限目前是执行器内构造的能力集，已经具备协议边界，但还没有接入更细粒度的角色/策略表。
+- 长期记忆已经区分 `semantic` 和 `episodic`，历史旧数据如果没有 `memory_kind` 元数据，不会被新的检索策略复用。
+- Redis 不可用时会降级，但 MySQL 是当前运行和测试的必需依赖。
+- MCP 工具需要配置 `MCP_HTTP_ENDPOINT` 后才会注册。
+
+## License
+
+本项目按 MIT License 发布。若仓库中未包含 `LICENSE` 文件，请在正式发布前补充。

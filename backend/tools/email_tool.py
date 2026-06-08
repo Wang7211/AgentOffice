@@ -22,6 +22,8 @@ class EmailTool(BaseTool):
         "cc": "可选，抄送邮箱地址，多个用逗号分隔。",
     }
 
+    required_permissions = frozenset({"email:send"})
+
     def run(self, tool_input: dict[str, Any]) -> ToolResult:
         """发送邮件。
 

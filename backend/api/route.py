@@ -9,7 +9,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from api.auth_route import get_current_user
 from database.db import get_db
+from database.tables import SysUser
 from schemas.chat import ChatCompletionRequest
 from schemas.knowledge import KnowledgeSearchRequest
 from services.chat_service import ChatService
@@ -39,6 +41,7 @@ async def health_check() -> dict[str, str]:
 async def chat_completions(
     request: ChatCompletionRequest,
     db_session: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
 ) -> StreamingResponse:
     """创建聊天补全。
 
@@ -57,19 +60,21 @@ async def chat_completions(
         event_iterator = chat_service.stream_chat(
             message=request.message,
             session_id=request.session_id,
-            user_id=request.user_id,
+            user_id=current_user.id,
         )
         return StreamingResponse(event_iterator, media_type="text/event-stream")
     result = await chat_service.complete_chat(
         message=request.message,
         session_id=request.session_id,
-        user_id=request.user_id,
+        user_id=current_user.id,
     )
     return success_response(result)
 
 
 @api_router.get("/tool/list")
-async def list_tools() -> object:
+async def list_tools(
+    _current_user: SysUser = Depends(get_current_user),
+) -> object:
     """列出全部已启用工具。
 
     返回:
@@ -87,6 +92,7 @@ async def list_tools() -> object:
 async def upload_knowledge(
     upload_file: UploadFile = File(...),
     db_session: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
 ) -> object:
     """上传并索引知识库文档。
 
@@ -101,7 +107,7 @@ async def upload_knowledge(
         ParameterException: 文件不合法时抛出。
     """
     service = KnowledgeService(db_session)
-    result = await service.upload_file(upload_file)
+    result = await service.upload_file(upload_file, upload_user_id=current_user.id)
     return success_response(result)
 
 
@@ -109,6 +115,7 @@ async def upload_knowledge(
 async def search_knowledge(
     request: KnowledgeSearchRequest,
     db_session: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
 ) -> object:
     """检索本地知识库。
 
@@ -123,13 +130,20 @@ async def search_knowledge(
         无。
     """
     service = KnowledgeService(db_session)
-    return success_response(service.search(request.query, request.top_k))
+    return success_response(
+        service.search(
+            request.query,
+            request.top_k,
+            upload_user_id=current_user.id,
+        )
+    )
 
 
 @api_router.get("/chat/history")
 async def chat_history(
     session_id: str | None = Query(default=None),
     db_session: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
 ) -> object:
     """返回聊天会话或消息记录。
 
@@ -144,7 +158,9 @@ async def chat_history(
         无。
     """
     service = ChatService(db_session)
-    return success_response(service.history(session_id=session_id))
+    return success_response(
+        service.history(session_id=session_id, user_id=current_user.id)
+    )
 
 
 # ─── Chat Session Management ──────────────────────────────
@@ -152,9 +168,9 @@ async def chat_history(
 
 @api_router.get("/chat/sessions")
 async def list_sessions(
-    user_id: int = Query(default=1),
     keyword: str | None = Query(default=None),
     db_session: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
 ) -> object:
     """获取用户的会话列表。
 
@@ -164,7 +180,9 @@ async def list_sessions(
         db_session: 数据库会话。
     """
     service = ChatService(db_session)
-    return success_response(service.list_sessions(user_id=user_id, keyword=keyword))
+    return success_response(
+        service.list_sessions(user_id=current_user.id, keyword=keyword)
+    )
 
 
 class RenameSessionRequest(BaseModel):
@@ -176,19 +194,23 @@ async def rename_session(
     session_id: str,
     request: RenameSessionRequest,
     db_session: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
 ) -> object:
     """重命名会话。"""
     if not request.session_name.strip():
         raise ParameterException("会话名称不能为空")
     service = ChatService(db_session)
-    return success_response(service.rename_session(session_id, request.session_name))
+    return success_response(
+        service.rename_session(session_id, request.session_name, current_user.id)
+    )
 
 
 @api_router.delete("/chat/sessions/{session_id}")
 async def delete_session(
     session_id: str,
     db_session: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
 ) -> object:
     """软删除会话。"""
     service = ChatService(db_session)
-    return success_response(service.delete_session(session_id))
+    return success_response(service.delete_session(session_id, current_user.id))
