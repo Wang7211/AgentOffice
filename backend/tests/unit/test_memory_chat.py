@@ -32,6 +32,17 @@ class TestChatMemory:
         messages = self._memory.get_recent(self._session_id)
         assert len(messages) <= max_messages
 
+    def test_compressed_summary_does_not_record_tool_usage(self) -> None:
+        summary = self._memory._compress_messages(
+            [
+                {"role": "user", "content": "请查询北京天气"},
+                {"role": "assistant", "content": "天气工具返回北京 20 度"},
+            ]
+        )
+
+        assert "用户诉求" in summary
+        assert "使用工具" not in summary
+
     def test_sessions_isolated(self) -> None:
         self._memory.append("session-a", "user", "A的消息")
         self._memory.append("session-b", "user", "B的消息")

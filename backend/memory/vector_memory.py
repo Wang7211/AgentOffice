@@ -236,6 +236,9 @@ class RedisKV:
         except redis_py.exceptions.ConnectionError:
             logger.warning("[RedisKV] {} 失败：Redis 不可用", op_name)
             return None
+        except redis_py.exceptions.RedisError as exc:
+            logger.warning("[RedisKV] {} 失败：{}", op_name, exc)
+            return None
 
     def get(self, key: str) -> Any:
         """读取键值。"""

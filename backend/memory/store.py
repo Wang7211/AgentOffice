@@ -1,8 +1,7 @@
-"""共享的单例记忆实例（惰性初始化）。
+"""Shared memory stores with lazy initialization.
 
-向量记忆 — Milvus（Milvus Lite 本地文件或远程服务）
-键值元数据 — Redis
-短期聊天记忆 — 内存滑动窗口
+Short-term memory uses an in-process sliding window plus Redis summary.
+Long-term memory uses Milvus vectors for cross-session durable facts.
 """
 
 from typing import Any
@@ -47,7 +46,6 @@ class _LazyRedis:
         return getattr(self._get(), name)
 
 
-# 首次方法调用时自动连接 Milvus
 vector_memory = _LazyMilvus("knowledge")
 agent_memory = _LazyMilvus("agent_memory")
 redis_kv = _LazyRedis()

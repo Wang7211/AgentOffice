@@ -10,15 +10,22 @@ class AgentState(TypedDict):
     messages: list[dict[str, str]]
     task_desc: str
     normalized_task: str
-    intent: dict[str, Any]
-    need_tool: bool
+    understanding: dict[str, Any]
+    capability_context: dict[str, Any]
+    task_contract: dict[str, Any]
+    task_evaluation: dict[str, Any]
+    short_term_summary: str
     relevant_memories: list[dict[str, Any]]
-    tool_name: str
-    tool_input: dict[str, Any]
-    tool_result: str
     plan: list[dict[str, Any]]
+    current_step_id: str
     tool_calls: list[dict[str, Any]]
-    tool_results: list[dict[str, Any]]
+    observations: list[dict[str, Any]]
+    recent_observations: list[dict[str, Any]]
+    resolved_references: list[dict[str, Any]]
+    replan_requested: bool
+    replan_context: dict[str, Any]
+    replan_count: int
+    max_replans: int
     step_count: int
     max_steps: int
     error_info: str

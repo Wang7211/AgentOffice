@@ -19,9 +19,8 @@ class ChatCompletionResponse(BaseModel):
     session_id: str
     message_id: int
     answer: str
-    tool_name: str | None = None
-    tool_result: str | None = None
     tool_calls: list[dict[str, object]] | None = None
+    observations: list[dict[str, object]] | None = None
     plan: list[dict[str, object]] | None = None
     reflection: dict[str, object] | None = None
     citations: list[dict[str, str]] | None = None

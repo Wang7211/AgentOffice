@@ -1,57 +1,226 @@
-"""LocalModelClient 本地规则模型测试。"""
+"""LocalModelClient semantic understanding and planning tests."""
 
 from typing import Any
 
+import pytest
+
+import services.llm_service as llm_service
 from services.llm_service import LocalModelClient
+from services.llm_service import QwenModelClient
 
 
 class TestLocalModelClient:
     def setup_method(self) -> None:
         self._client = LocalModelClient()
 
-    # ------------------------------------------------------------------
-    # 意图分类
-    # ------------------------------------------------------------------
+    def test_local_model_has_no_deterministic_planner(self) -> None:
+        planning_error = getattr(llm_service, "PlanningError")
 
-    def test_analyze_capability_question(self) -> None:
-        """用户询问能力边界，不应触发工具。"""
-        result = self._client.analyze_task("你能做什么", [])
-        assert result["tool_name"] == ""
+        with pytest.raises(planning_error):
+            self._client.create_plan(
+                analysis={"normalized_task": "answer"},
+                memories=[],
+                tool_specs=[],
+            )
 
-    def test_analyze_weather_intent(self) -> None:
+    def test_remote_planner_repairs_invalid_plan_once(self) -> None:
+        client = QwenModelClient(
+            api_key="test-key",
+            base_url="https://example.test",
+            model_name="test-model",
+        )
+        responses = [
+            '{"steps":[{"id":"bad","kind":"tool","tool_name":"missing"}]}',
+            '{"steps":[{"id":"respond","kind":"respond","depends_on":[],"status":"pending"}]}',
+        ]
+        calls = []
+
+        def fake_completion(messages, temperature):
+            calls.append(messages)
+            return responses.pop(0)
+
+        client._request_chat_completion = fake_completion  # type: ignore[method-assign]
+        plan = client.create_plan(
+            analysis={"normalized_task": "answer"},
+            memories=[],
+            tool_specs=[],
+            capability_context={"allowed_tools": []},
+        )
+
+        assert [step["id"] for step in plan] == ["respond"]
+        assert len(calls) == 2
+        assert "validation_error" in calls[1][-1]["content"]
+
+    def test_remote_planner_blocks_after_failed_repair(self) -> None:
+        planning_error = getattr(llm_service, "PlanningError")
+        client = QwenModelClient(
+            api_key="test-key",
+            base_url="https://example.test",
+            model_name="test-model",
+        )
+        calls = []
+
+        def fake_completion(messages, temperature):
+            calls.append(messages)
+            return '{"steps":[{"id":"bad","kind":"tool","tool_name":"missing"}]}'
+
+        client._request_chat_completion = fake_completion  # type: ignore[method-assign]
+
+        with pytest.raises(planning_error):
+            client.create_plan(
+                analysis={"normalized_task": "answer"},
+                memories=[],
+                tool_specs=[],
+                capability_context={"allowed_tools": []},
+            )
+
+        assert len(calls) == 2
+
+    def test_remote_planner_never_delegates_to_fallback_planner(self) -> None:
+        planning_error = getattr(llm_service, "PlanningError")
+
+        class FallbackPlanner(LocalModelClient):
+            def create_plan(self, **kwargs):  # type: ignore[no-untyped-def]
+                _ = kwargs
+                raise AssertionError("fallback planner must not be called")
+
+        client = QwenModelClient(
+            api_key="test-key",
+            base_url="https://example.test",
+            model_name="test-model",
+            fallback_client=FallbackPlanner(),
+        )
+        calls = []
+
+        def fake_completion(messages, temperature):
+            calls.append(messages)
+            return '{"steps":[{"id":"bad","kind":"tool","tool_name":"missing"}]}'
+
+        client._request_chat_completion = fake_completion  # type: ignore[method-assign]
+
+        with pytest.raises(planning_error):
+            client.create_plan(
+                analysis={"normalized_task": "answer"},
+                memories=[],
+                tool_specs=[],
+                capability_context={"allowed_tools": []},
+            )
+
+        assert len(calls) == 2
+
+    def test_understand_weather_as_semantic_fact_not_tool_selection(self) -> None:
         result = self._client.analyze_task("北京天气怎么样", [])
-        assert result["tool_name"] == "weather"
 
-    def test_analyze_time_intent(self) -> None:
-        result = self._client.analyze_task("现在几点了", [])
-        assert result["tool_name"] == "time"
+        assert "tool_name" not in result
+        assert "tool_input" not in result
+        assert result["normalized_task"] == "北京天气怎么样"
+        assert result["understanding_source"] == "layer1_keyword"
+        assert {
+            "type": "user_request",
+            "predicate": "query",
+            "object": "weather",
+            "qualifiers": {"location": "北京"},
+            "source": "user",
+        } in result["semantic_facts"]
 
-    def test_analyze_calculation_intent(self) -> None:
+    def test_understand_chat_as_semantic_fact(self) -> None:
+        result = self._client.analyze_task("我今天有点累，想和你随便聊一聊", [])
+
+        assert "tool_name" not in result
+        assert result["semantic_facts"][0]["predicate"] == "chat"
+        assert result["semantic_facts"][0]["object"] == "conversation"
+
+    def test_understand_calculation_as_fact_not_code_tool(self) -> None:
         result = self._client.analyze_task("计算 25 * 4 + 10", [])
-        assert result["tool_name"] == "code"
 
-    def test_analyze_chat_intent(self) -> None:
-        """简单问候不应触发工具。"""
-        result = self._client.analyze_task("你好", [])
-        assert result["tool_name"] == ""
+        assert "tool_name" not in result
+        assert result["semantic_facts"][0]["predicate"] == "calculate"
+        assert result["semantic_facts"][0]["object"] == "expression"
 
-    def test_analyze_math_expression_detection(self) -> None:
-        """带运算符和数字的消息应识别为计算。"""
-        result = self._client.analyze_task("3 + 5", [])
-        assert result["tool_name"] == "code"
+    def test_understand_uses_llm_after_keyword_miss(self) -> None:
+        class LLMOnlyClient(LocalModelClient):
+            def __init__(self) -> None:
+                self.semantic_calls = 0
 
-    def test_analyze_light_entertainment(self) -> None:
-        result = self._client.analyze_task("讲个笑话", [])
-        # 娱乐请求不应触发工具
-        assert result["tool_name"] == ""
+            def _layer1_semantic_facts(self, message: str) -> list[dict[str, Any]]:
+                _ = message
+                return []
 
-    def test_farewell_chat(self) -> None:
-        result = self._client.analyze_task("再见", [])
-        assert result["tool_name"] == ""
+            def interpret_semantics(
+                self,
+                message: str,
+                memories: list[dict[str, Any]] | None = None,
+                memory_ctx: Any = None,
+            ) -> dict[str, Any]:
+                _ = memories
+                _ = memory_ctx
+                self.semantic_calls += 1
+                return {
+                    "semantic_facts": [
+                        {
+                            "type": "user_request",
+                            "predicate": "search",
+                            "object": "knowledge",
+                            "qualifiers": {"query": message},
+                            "source": "user",
+                        }
+                    ],
+                    "provider": "test",
+                }
 
-    # ------------------------------------------------------------------
-    # 约束抽取
-    # ------------------------------------------------------------------
+        client = LLMOnlyClient()
+        result = client.analyze_task("请处理这个请求", [])
+
+        assert client.semantic_calls == 1
+        assert result["semantic_facts"][0]["object"] == "knowledge"
+        assert result["understanding_source"] == "layer2_llm"
+
+    def test_understand_normalizes_invalid_llm_shapes(self) -> None:
+        class OddLLMClient(LocalModelClient):
+            def _layer1_semantic_facts(self, message: str) -> list[dict[str, Any]]:
+                _ = message
+                return []
+
+            def interpret_semantics(
+                self,
+                message: str,
+                memories: list[dict[str, Any]] | None = None,
+                memory_ctx: Any = None,
+            ) -> dict[str, Any]:
+                _ = message
+                _ = memories
+                _ = memory_ctx
+                return {
+                    "semantic_facts": [
+                        {
+                            "predicate": "query",
+                            "object": "weather",
+                            "qualifiers": ["not", "a", "dict"],
+                        }
+                    ],
+                    "entities": ["not", "a", "dict"],
+                    "constraints": "not-a-dict",
+                    "ambiguities": "not-a-list",
+                }
+
+        result = OddLLMClient().analyze_task("查天气", [])
+
+        assert result["entities"] == {}
+        assert result["constraints"] == {}
+        assert result["ambiguities"] == []
+        assert result["semantic_facts"][0]["qualifiers"] == {}
+
+    def test_layer1_does_not_treat_bare_email_as_action(self) -> None:
+        result = self._client.analyze_task("user@example.com", [])
+
+        assert result["understanding_source"] == "layer2_llm"
+        assert result["semantic_facts"][0]["object"] == "general_answer"
+
+    def test_layer1_does_not_treat_bare_file_path_as_read_action(self) -> None:
+        result = self._client.analyze_task("C:\\docs\\test.pdf", [])
+
+        assert result["understanding_source"] == "layer2_llm"
+        assert result["semantic_facts"][0]["object"] == "general_answer"
 
     def test_extract_file_path_windows(self) -> None:
         constraints = self._client._extract_constraints("读取 C:\\docs\\test.pdf")
@@ -63,53 +232,144 @@ class TestLocalModelClient:
         assert len(constraints["dates"]) >= 1
         assert "2024-01-15" in constraints["dates"][0]
 
-    # ------------------------------------------------------------------
-    # 生成 / 计划 / 反思 / 记忆（本地模型确定性行为）
-    # ------------------------------------------------------------------
-
     def test_generate_directly(self) -> None:
-        answer = self._client.generate("你好吗", context=[{"role": "user", "content": "你好吗"}])
-        assert "当前运行在本地规则模型模式" in answer or "我已结合之前对话理解你的问题" in answer
+        answer = self._client.generate(
+            "你好吗",
+            context=[{"role": "user", "content": "你好吗"}],
+        )
+        assert "我已结合上下文理解你的问题" in answer
 
-    def test_generate_with_tool_result(self) -> None:
+    def test_generate_with_observation_summary(self) -> None:
         answer = self._client.generate(
             "查询结果如何",
-            tool_result="温度 25°C，湿度 60%",
+            observation_summary="温度 25C，湿度 60%",
             context=[],
         )
-        assert "已完成工具调用" in answer
-        assert "温度 25°C" in answer
+        assert "观察结果如下" in answer
+        assert "温度 25C" in answer
 
-    def test_create_plan_search(self) -> None:
-        analysis = {
-            "tool_name": "search",
-            "tool_input": {"query": "北京天气"},
-            "normalized_task": "北京天气",
+    def test_local_completion_quality_requires_nonempty_answer(self) -> None:
+        contract = {
+            "objective": "summarize report",
+            "criteria": [
+                {
+                    "id": "fact_1",
+                    "type": "semantic_quality",
+                    "description": "The answer summarizes the report.",
+                }
+            ],
         }
-        plan = self._client.create_plan(
-            analysis=analysis,
-            memories=[],
-            tool_specs=[{"name": "search", "description": "搜索"}],
-        )
-        step_names = [s["name"] for s in plan]
-        assert any("search" in n for n in step_names)
 
-    def test_create_plan_no_tool(self) -> None:
-        analysis = {
-            "tool_name": "",
-            "tool_input": {},
-            "normalized_task": "你好",
+        empty = self._client.evaluate_completion_quality(
+            task_contract=contract,
+            answer="",
+            observations=[],
+        )
+        nonempty = self._client.evaluate_completion_quality(
+            task_contract=contract,
+            answer="Summary",
+            observations=[],
+        )
+
+        assert empty["satisfied"] is False
+        assert nonempty["satisfied"] is True
+
+    def test_remote_completion_quality_parses_structured_result(self) -> None:
+        client = QwenModelClient(
+            api_key="test-key",
+            base_url="https://example.test",
+            model_name="test-model",
+        )
+        calls = []
+
+        def fake_completion(messages, temperature):
+            calls.append({"messages": messages, "temperature": temperature})
+            return '{"satisfied": true, "reason": "covers required points"}'
+
+        client._request_chat_completion = fake_completion  # type: ignore[method-assign]
+        result = client.evaluate_completion_quality(
+            task_contract={
+                "objective": "summarize report",
+                "criteria": [{"type": "semantic_quality"}],
+            },
+            answer="Summary",
+            observations=[],
+        )
+
+        assert result == {
+            "satisfied": True,
+            "reason": "covers required points",
         }
-        plan = self._client.create_plan(
-            analysis=analysis,
-            memories=[],
-            tool_specs=[],
-        )
-        assert len(plan) == 3  # understand + plan + action
+        assert calls[0]["temperature"] == 0.0
+        assert "semantic-quality" in calls[0]["messages"][0]["content"]
 
-    # ------------------------------------------------------------------
-    # 工具和业务规则检测
-    # ------------------------------------------------------------------
+    def test_normalize_plan_result_defends_step_shapes(self) -> None:
+        raw = """
+        ```json
+        {"steps": [{"id": "x", "kind": "tool", "tool_name": "weather",
+        "tool_input": ["bad"], "depends_on": "plan", "status": "pending"}]}
+        ```
+        """
+        plan = QwenModelClient()._normalize_plan_result(
+            raw,
+            {"normalized_task": "北京天气"},
+            [{"name": "weather"}],
+        )
+
+        assert plan[0]["depends_on"] == []
+        assert plan[0]["tool_input"] == {"city": "北京"}
+
+    def test_normalize_plan_result_rejects_tool_outside_capability_boundary(self) -> None:
+        raw = '{"steps": [{"id": "x", "kind": "tool", "tool_name": "weather"}]}'
+
+        try:
+            QwenModelClient()._normalize_plan_result(
+                raw,
+                {"normalized_task": "Beijing weather"},
+                [{"name": "weather"}],
+                capability_context={"allowed_tools": []},
+            )
+        except ValueError as exc:
+            assert "unregistered tool" in str(exc)
+        else:
+            raise AssertionError("expected unavailable tool to be rejected")
+
+    def test_normalize_plan_result_rejects_tool_step_without_tool_name(self) -> None:
+        raw = '{"steps": [{"id": "x", "kind": "tool", "goal": "explain context"}]}'
+
+        with pytest.raises(ValueError, match="tool step missing required tool_name"):
+            QwenModelClient()._normalize_plan_result(
+                raw,
+                {"normalized_task": "explain context"},
+                [{"name": "knowledge"}],
+                capability_context={"allowed_tools": ["knowledge"]},
+            )
+
+    def test_remote_planner_prompt_requires_tool_name_for_tool_steps(self) -> None:
+        client = QwenModelClient(
+            api_key="test-key",
+            base_url="https://example.test",
+            model_name="test-model",
+        )
+        calls = []
+
+        def fake_completion(messages, temperature):
+            calls.append(messages)
+            return '{"steps":[{"id":"respond","kind":"respond","depends_on":[],"status":"pending"}]}'
+
+        client._request_chat_completion = fake_completion  # type: ignore[method-assign]
+
+        client.create_plan(
+            analysis={"normalized_task": "explain context"},
+            memories=[],
+            tool_specs=[{"name": "knowledge"}],
+            capability_context={"allowed_tools": ["knowledge"]},
+        )
+
+        system_prompt = calls[0][0]["content"]
+        assert 'kind="tool"' in system_prompt
+        assert "must include a non-empty tool_name" in system_prompt
+        assert 'use kind="respond" or kind="compose"' in system_prompt
 
     def test_is_search_query(self) -> None:
         assert self._client._is_search_query("搜索人工智能") is True

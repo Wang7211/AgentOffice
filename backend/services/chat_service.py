@@ -101,6 +101,10 @@ class ChatService:
                 model_name=session.model_name,
             )
             recent_history = self._load_agent_history(session.session_id, user_id)
+            recent_observations = self._load_recent_observations(
+                session.session_id,
+                user_id,
+            )
             user_record = self._create_record(session.session_id, "user", message)
             log_agent_event(
                 "chat_record_buffered",
@@ -115,6 +119,7 @@ class ChatService:
                 session_id=session.session_id,
                 history=recent_history,
                 user_id=user_id,
+                recent_observations=recent_observations,
             )
             assistant_record = self._create_record(
                 session.session_id,
@@ -129,15 +134,23 @@ class ChatService:
                 content_preview=preview_text(agent_result["answer"]),
             )
             self._create_tool_record(user_record.id, agent_result, start_time)
+            chat_memory.append_observations(
+                session.session_id,
+                self._tool_observations(agent_result),
+            )
             chat_memory.append(session.session_id, "assistant", agent_result["answer"])
             self._db_session.commit()
+            tool_name = self._primary_tool_name(agent_result)
+            tool_observations = self._tool_observations(agent_result)
+            observation_summary = self._observation_summary(agent_result)
             log_agent_event(
                 "chat_committed",
                 session_id=session.session_id,
                 user_record_id=user_record.id,
                 assistant_record_id=assistant_record.id,
-                tool_name=agent_result.get("tool_name") or "direct_answer",
-                has_tool_result=bool(agent_result.get("tool_result")),
+                tool_name=tool_name or "direct_answer",
+                tool_names=self._tool_names_from_observations(tool_observations),
+                has_observation=bool(observation_summary),
                 total_duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
             )
             citations = self._extract_citations(agent_result)
@@ -145,9 +158,8 @@ class ChatService:
                 "session_id": session.session_id,
                 "message_id": assistant_record.id,
                 "answer": agent_result["answer"],
-                "tool_name": agent_result.get("tool_name"),
-                "tool_result": agent_result.get("tool_result"),
                 "tool_calls": agent_result.get("tool_calls", []),
+                "observations": agent_result.get("observations", []),
                 "plan": agent_result.get("plan", []),
                 "reflection": agent_result.get("reflection", {}),
                 "citations": citations,
@@ -181,10 +193,6 @@ class ChatService:
             history_source = "database" if recent_history else "empty"
 
         summary = redis_kv.get(f"summary:{session_id}")
-        if summary:
-            recent_history = [
-                {"role": "system", "content": f"【历史对话摘要】{summary}"},
-            ] + recent_history
 
         log_agent_event(
             "chat_history_loaded",
@@ -195,6 +203,78 @@ class ChatService:
             has_summary=bool(summary),
         )
         return recent_history
+
+    def _load_recent_observations(
+        self,
+        session_id: str,
+        user_id: int,
+    ) -> list[dict[str, object]]:
+        """Load recent reusable tool results for follow-up references."""
+        observations = chat_memory.get_recent_observations(session_id)
+        source = "memory"
+        if not observations:
+            observations = self._restore_recent_observations(session_id, user_id)
+            source = "database" if observations else "empty"
+        log_agent_event(
+            "recent_observations_loaded",
+            session_id=session_id,
+            user_id=user_id,
+            source=source,
+            observation_count=len(observations),
+            tool_names=self._tool_names_from_observations(observations),
+        )
+        return observations
+
+    def _restore_recent_observations(
+        self,
+        session_id: str,
+        user_id: int,
+    ) -> list[dict[str, object]]:
+        """Restore recent tool observations from persisted ToolRecord rows."""
+        records = (
+            self._db_session.query(ToolRecord)
+            .join(ChatRecord, ChatRecord.id == ToolRecord.chat_record_id)
+            .join(ChatSession, ChatSession.session_id == ChatRecord.session_id)
+            .filter(
+                ChatRecord.session_id == session_id,
+                ChatRecord.is_delete == 0,
+                ChatSession.user_id == user_id,
+                ChatSession.is_delete == 0,
+            )
+            .order_by(desc(ToolRecord.create_time), desc(ToolRecord.id))
+            .limit(10)
+            .all()
+        )
+        observations = [
+            self._tool_record_to_observation(record)
+            for record in reversed(records)
+        ]
+        chat_memory.append_observations(session_id, observations)
+        return observations
+
+    @staticmethod
+    def _tool_record_to_observation(record: ToolRecord) -> dict[str, object]:
+        try:
+            tool_input = json.loads(record.tool_input or "{}")
+        except json.JSONDecodeError:
+            tool_input = {}
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        status = "success" if int(record.status or 0) == 1 else "failed"
+        return {
+            "type": "tool_result",
+            "step_id": f"tool_record:{record.id}",
+            "tool_record_id": record.id,
+            "chat_record_id": record.chat_record_id,
+            "tool_name": record.tool_name,
+            "tool_input": tool_input,
+            "content": record.tool_result or "",
+            "status": status,
+            "error_msg": record.error_msg or "",
+            "duration_ms": round(float(record.cost_time or 0.0) * 1000, 2),
+            "created_at": local_isoformat(record.create_time),
+            "reused": True,
+        }
 
     def _restore_recent_history(
         self,
@@ -227,15 +307,63 @@ class ChatService:
         return history
 
     @staticmethod
+    def _tool_observations(
+        agent_result: dict[str, object],
+    ) -> list[dict[str, object]]:
+        observations = agent_result.get("observations") or []
+        if not isinstance(observations, list):
+            return []
+        return [
+            dict(item)
+            for item in observations
+            if isinstance(item, dict) and item.get("type") == "tool_result"
+        ]
+
+    @staticmethod
+    def _tool_names_from_observations(
+        observations: list[dict[str, object]],
+    ) -> list[str]:
+        names: list[str] = []
+        for observation in observations:
+            tool_name = str(observation.get("tool_name") or "")
+            if tool_name and tool_name not in names:
+                names.append(tool_name)
+        return names
+
+    @staticmethod
+    def _primary_tool_name(agent_result: dict[str, object]) -> str:
+        for tool_call in ChatService._tool_observations(agent_result):
+            tool_name = str(tool_call.get("tool_name") or "")
+            if tool_name:
+                return tool_name
+        return ""
+
+    @staticmethod
+    def _observation_summary(agent_result: dict[str, object]) -> str:
+        lines: list[str] = []
+        for tool_call in ChatService._tool_observations(agent_result):
+            if tool_call.get("status") != "success":
+                continue
+            tool_name = str(tool_call.get("tool_name") or "")
+            content = str(tool_call.get("content") or "")
+            if tool_name and content:
+                lines.append(f"[{tool_name}]\n{content}")
+        return "\n\n".join(lines)
+
+    @staticmethod
     def _extract_citations(agent_result: dict[str, object]) -> list[dict[str, str]]:
         """从 agent 结果中提取知识库引用文档列表。"""
-        tool_calls = agent_result.get("tool_results") or agent_result.get("tool_calls") or []
+        tool_calls = (
+            agent_result.get("observations") or []
+        )
         if not isinstance(tool_calls, list) or not tool_calls:
             return []
         seen: set[str] = set()
         citations: list[dict[str, str]] = []
         for tc in tool_calls:
             if not isinstance(tc, dict):
+                continue
+            if tc.get("type") != "tool_result":
                 continue
             if tc.get("tool_name") != "knowledge":
                 continue
@@ -279,7 +407,7 @@ class ChatService:
         meta_data = json.dumps({
             "session_id": result["session_id"],
             "citations": result.get("citations", []),
-            "tool_name": result.get("tool_name"),
+            "tool_calls": result.get("tool_calls", []),
         })
         yield f"event: meta\ndata: {meta_data}\n\n"
         answer = str(result["answer"])
@@ -288,7 +416,7 @@ class ChatService:
             yield f"event: message\ndata: {json.dumps({'content': char})}\n\n"
         done_data = json.dumps({
             "citations": result.get("citations", []),
-            "tool_name": result.get("tool_name"),
+            "tool_calls": result.get("tool_calls", []),
         })
         yield f"event: done\ndata: {done_data}\n\n"
 
@@ -389,18 +517,20 @@ class ChatService:
         start_time: float,
     ) -> None:
         """在工具被调用时创建工具调用日志。"""
-        tool_calls = agent_result.get("tool_results") or agent_result.get("tool_calls")
+        tool_calls = (
+            agent_result.get("observations")
+        )
         if isinstance(tool_calls, list) and tool_calls:
             for tool_call in tool_calls:
                 if not isinstance(tool_call, dict):
+                    continue
+                if tool_call.get("type") != "tool_result":
                     continue
                 self._create_single_tool_record(
                     chat_record_id=chat_record_id,
                     tool_name=str(tool_call.get("tool_name") or ""),
                     tool_input=tool_call.get("tool_input") or {},
-                    tool_result=str(
-                        tool_call.get("tool_result") or tool_call.get("content") or "",
-                    ),
+                    tool_result=str(tool_call.get("content") or ""),
                     cost_time=float(tool_call.get("duration_ms") or 0) / 1000,
                     status=1 if tool_call.get("status") in ("success", "completed") else 0,
                     error_msg=str(tool_call.get("error_msg") or ""),
@@ -410,7 +540,7 @@ class ChatService:
             "tool_record_skipped",
             chat_record_id=chat_record_id,
             reason="no_real_tool_calls",
-            agent_tool_name=str(agent_result.get("tool_name") or ""),
+            agent_tool_name=self._primary_tool_name(agent_result),
             elapsed_ms=round((time.perf_counter() - start_time) * 1000, 2),
         )
 

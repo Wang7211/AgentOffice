@@ -3,9 +3,80 @@
 import pytest
 
 from agent.graph import AgentGraph
+from services.llm_service import LocalModelClient
 
 
 _RUN_COUNTER = 0
+
+
+class _ScriptedPlanner(LocalModelClient):
+    """Test-only planner that keeps integration tests offline and deterministic."""
+
+    def create_plan(
+        self,
+        analysis,
+        memories,
+        tool_specs,
+        observations=None,
+        memory_ctx=None,
+        replan_context=None,
+        capability_context=None,
+    ):
+        _ = memories
+        _ = observations
+        _ = memory_ctx
+        _ = replan_context
+        allowed = set((capability_context or {}).get("allowed_tools", []))
+        steps = []
+        for fact in analysis.get("semantic_facts", []):
+            predicate = str(fact.get("predicate") or "")
+            obj = str(fact.get("object") or "")
+            qualifiers = dict(fact.get("qualifiers") or {})
+            tool_name = ""
+            tool_input = {}
+            if predicate == "query" and obj == "weather":
+                tool_name = "weather"
+                tool_input = {"city": str(qualifiers.get("location") or "")}
+            elif predicate == "query" and obj == "time":
+                tool_name = "time"
+            elif predicate == "calculate" and obj == "expression":
+                tool_name = "code"
+                tool_input = {"expression": str(qualifiers.get("expression") or "")}
+            elif predicate == "send" and qualifiers.get("channel") == "email":
+                tool_name = "email"
+                tool_input = {
+                    "to": str(qualifiers.get("recipient") or ""),
+                    "subject": str(qualifiers.get("subject") or "test"),
+                    "body": str(qualifiers.get("body") or "test"),
+                }
+            if not tool_name or tool_name not in allowed:
+                continue
+            step_id = f"tool_{len(steps) + 1}"
+            steps.append(
+                {
+                    "id": step_id,
+                    "kind": "tool",
+                    "phase": "tools",
+                    "name": f"Call {tool_name}",
+                    "goal": f"Execute {tool_name}",
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "depends_on": [steps[-1]["id"]] if steps else [],
+                    "status": "pending",
+                }
+            )
+        steps.append(
+            {
+                "id": "respond",
+                "kind": "compose" if steps else "respond",
+                "phase": "action",
+                "name": "Respond",
+                "goal": "Return the task outcome.",
+                "depends_on": [steps[-1]["id"]] if steps else [],
+                "status": "pending",
+            }
+        )
+        return steps
 
 
 def _unique_session_id() -> str:
@@ -21,6 +92,7 @@ class TestAgentPipeline:
 
     def setup_method(self) -> None:
         self._graph = AgentGraph()
+        self._graph._nodes._model_client = _ScriptedPlanner()
 
     def test_agent_handles_greeting(self) -> None:
         """打招呼 -> 无需工具 -> 直接回复。"""
@@ -31,7 +103,7 @@ class TestAgentPipeline:
         )
         assert result["answer"] != ""
         assert result["session_id"] == "int-test-greeting"
-        assert result["need_tool"] is False
+        assert result["tool_calls"] == []
 
     def test_agent_handles_time_query(self) -> None:
         """时间查询：understand 识别 tool -> planning 决策 -> tool 执行 -> action 回复。"""
@@ -41,9 +113,8 @@ class TestAgentPipeline:
             history=[],
         )
         assert result["answer"] != ""
-        assert result["need_tool"] is True
-        assert result["tool_name"] == "time"
-        assert result["tool_result"] != ""
+        assert result["tool_calls"][0]["tool_name"] == "time"
+        assert result["observations"] != []
 
     def test_agent_handles_weather_query(self) -> None:
         """天气查询：understand -> planning -> tool (weather) -> action。"""
@@ -53,8 +124,7 @@ class TestAgentPipeline:
             history=[],
         )
         assert result["answer"] != ""
-        assert result["need_tool"] is True
-        assert result["tool_name"] == "weather"
+        assert result["tool_calls"][0]["tool_name"] == "weather"
 
     def test_agent_handles_email_query(self) -> None:
         """邮件发送：understand -> planning -> tool (email) -> action。"""
@@ -64,8 +134,7 @@ class TestAgentPipeline:
             history=[],
         )
         assert result["answer"] != ""
-        assert result["need_tool"] is True
-        assert result["tool_name"] == "email"
+        assert result["tool_calls"][0]["tool_name"] == "email"
 
     def test_agent_handles_capability_question(self) -> None:
         result = self._graph.run(
@@ -140,20 +209,20 @@ class TestAgentPipeline:
     # 记忆持久化
     # ------------------------------------------------------------------
 
-    def test_memory_persistence_between_rounds(self) -> None:
-        """第一次调用 mem_post 写入记忆，第二次 mem_pre 应能加载历史记忆。"""
+    def test_memory_context_between_rounds(self) -> None:
+        """Second round should load short-term context and long-term retrieval safely."""
         session_id = _unique_session_id()
 
-        # 第一轮：执行带工具的查询，触发 mem_post 写记忆
+        # 第一轮：执行带工具的查询。
         result_1 = self._graph.run(
             user_message="现在几点了",
             session_id=session_id,
             history=[],
         )
         assert result_1["answer"] != ""
-        assert result_1["need_tool"] is True
+        assert result_1["tool_calls"] != []
 
-        # 第二轮：同一个 session，查询相似内容，检查是否能加载历史记忆
+        # 第二轮：同一个 session，检查记忆上下文链路不报错。
         result_2 = self._graph.run(
             user_message="告诉我时间",
             session_id=session_id,
