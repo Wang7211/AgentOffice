@@ -227,62 +227,7 @@ docker compose down
 | `AGENT_MEMORY_SIMILARITY_THRESHOLD` | Agent 长期记忆检索阈值 |
 | `MCP_HTTP_ENDPOINT` / `MCP_API_KEY` | MCP HTTP 工具端点和密钥 |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | 邮件发送配置 |
-| `JWT_SECRET_KEY` | JWT 签名密钥，生产环境必须替换 |
-
-## 开发与验证
-
-后端语法检查：
-
-```powershell
-python -B -m compileall backend
-```
-
-后端测试：
-
-```powershell
-pytest backend/tests
-```
-
-测试依赖 `TEST_DATABASE_URL` 指向的 MySQL 可连接。如果看到 `Can't connect to MySQL server on '127.0.0.1:3307'`，先确认 Docker MySQL 已启动：
-
-```powershell
-docker compose up -d mysql
-```
-
-前端构建：
-
-```powershell
-cd frontend
-npm run build
-```
-
-## 常见问题
-
-### Redis 不可用
-
-日志中出现：
-
-```text
-[RedisKV] get/set/delete 失败：Redis 不可用
-```
-
-说明后端无法连接 `REDIS_URL`。检查方式：
-
-```powershell
-redis-cli ping
-```
-
-### 本地后端连不上 MySQL
-
-如果 MySQL 来自 `docker compose`，本机连接端口是 `3307`，不是容器内的 `3306`。确认 `.env` 中：
-
-```env
-DATABASE_URL=mysql+pymysql://agentoffice:agentoffice123@127.0.0.1:3307/agentoffice?charset=utf8mb4
-```
-
-### 模型规划失败
-
-Agent 的任务规划依赖模型输出合法 JSON 计划。系统会对计划做结构校验，例如工具步骤必须有 `tool_name`。如果连续修复后仍不合法，任务会被标记为 `blocked`，不会盲目执行工具。
+| `JWT_SECRET_KEY` | JWT 签名密钥 |
 
 ## License
 
